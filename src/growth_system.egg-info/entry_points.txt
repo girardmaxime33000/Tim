@@ -1,0 +1,2 @@
+[console_scripts]
+growth = growth_system.cli:app
