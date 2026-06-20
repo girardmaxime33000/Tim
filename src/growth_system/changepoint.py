@@ -27,7 +27,7 @@ class CusumDetector:
     def calibrate(self, series: pd.Series) -> None:  # type: ignore[type-arg]
         """Estimate mu0, sigma from series; set k=0.5*sigma, h=4.5*sigma."""
         self.mu0 = float(series.mean())
-        sigma = float(series.std())
+        sigma = max(float(series.std()), 1e-3)  # guard against zero-variance series
         self.k = 0.5 * sigma
         self.h = 4.5 * sigma
         self._s_plus = 0.0
