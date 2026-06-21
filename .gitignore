@@ -6,3 +6,6 @@ __pycache__/
 dist/
 build/
 .mypy_cache/
+growth_state.json
+data/snapshots/
+data/leads.csv

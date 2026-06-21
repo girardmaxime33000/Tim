@@ -1,7 +1,0 @@
-numpy
-pandas
-scipy
-scikit-learn
-matplotlib
-pydantic>=2
-typer
