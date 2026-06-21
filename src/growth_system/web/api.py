@@ -13,6 +13,8 @@ from typing import Any
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from growth_system.archetypes import ALL_ARMS, ArmId, archetype_of
@@ -76,7 +78,17 @@ def _save_bandit_state() -> None:
 # App
 # ---------------------------------------------------------------------------
 
+_STATIC_DIR = Path(__file__).parent / "static"
+
 app = FastAPI(title="Growth System API", version="0.1.0")
+
+# Serve frontend static files (HTML/CSS/JS) at root
+if _STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def root() -> FileResponse:
+        return FileResponse(str(_STATIC_DIR / "index.html"))
 
 app.add_middleware(
     CORSMiddleware,

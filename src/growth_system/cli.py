@@ -111,6 +111,31 @@ def monitor(
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Bind host"),
+    port: int = typer.Option(8000, help="Bind port"),
+    open: bool = typer.Option(True, "--open/--no-open", help="Open browser automatically"),
+) -> None:
+    """Start the web UI (FastAPI + frontend) and open the browser."""
+    import threading
+    import time
+    import webbrowser
+    import uvicorn
+    from growth_system.web.api import app as web_app
+
+    url = f"http://{host}:{port}"
+
+    if open:
+        def _open() -> None:
+            time.sleep(1.2)
+            webbrowser.open(url)
+        threading.Thread(target=_open, daemon=True).start()
+
+    typer.echo(f"Growth System UI → {url}")
+    uvicorn.run(web_app, host=host, port=port, log_level="warning")
+
+
+@app.command()
 def backtest(
     posts: str = typer.Option("data/posts.csv"),
     audience: str = typer.Option("data/daily_audience.csv"),
