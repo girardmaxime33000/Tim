@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from growth_system.archetypes import ALL_ARMS, ArmId, archetype_of
+from growth_system.web.ingest import IngestError, ingest_to_path, load_raw, normalize
 from growth_system.bandit import DiscountedThompsonBandit
 from growth_system.changepoint import CusumDetector
 from growth_system.config import SystemConfig
@@ -343,6 +344,69 @@ def update(req: UpdateRequest) -> UpdateResponse:
         for a, ab in post.items()
     }
     return UpdateResponse(reward=round(reward, 4), bandit_updated=True, posteriors=posteriors)
+
+
+SNAPSHOT_DIR = DATA_DIR / "snapshots"
+
+
+class IngestResponse(BaseModel):
+    n_raw: int
+    n_posts: int
+    duplicates_removed: int
+    tail_rate: float
+    date_range: str
+    snapshot: str | None
+    destination: str
+
+
+@app.post("/api/ingest", response_model=IngestResponse)
+async def ingest(
+    file: UploadFile = File(...),
+    author: str | None = Form(default=None),
+    dry_run: bool = Form(default=False),
+) -> IngestResponse:
+    """Ingest a LinkedIn export file and normalise it into posts.csv."""
+    content = await file.read()
+    filename = file.filename or "upload.csv"
+
+    if dry_run:
+        # Validate without writing
+        try:
+            raw = load_raw(content, filename)
+            normalized = normalize(raw, author_filter=author)
+        except IngestError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        from growth_system.web.ingest import _parse_days_ago
+        days = normalized["days_ago"].dropna()
+        date_range = (
+            f"{int(days.min())}–{int(days.max())} jours" if len(days) else "N/A"
+        )
+        return IngestResponse(
+            n_raw=len(raw),
+            n_posts=len(normalized),
+            duplicates_removed=len(raw) - len(normalized),
+            tail_rate=round(float((normalized["eng_score"] >= 98.2).mean()), 3),
+            date_range=date_range,
+            snapshot=None,
+            destination="(dry-run — aucune écriture)",
+        )
+
+    try:
+        summary = ingest_to_path(
+            content=content,
+            filename=filename,
+            dest=POSTS_CSV,
+            snapshot_dir=SNAPSHOT_DIR,
+            author_filter=author,
+        )
+    except IngestError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    # Reset scorer singleton so next call reloads from fresh posts.csv
+    global _scorer
+    _scorer = None
+
+    return IngestResponse(**summary)
 
 
 def _append_lead(post_id: str, leads: int) -> None:
