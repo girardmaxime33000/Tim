@@ -144,8 +144,8 @@ class TestNormalize:
         with pytest.raises(IngestError, match="minimum requis"):
             normalize(df)
 
-    def test_truncation_guard_raises(self) -> None:
-        # 60 rows but all text < 10 chars (truncated)
+    def test_truncation_guard_median_raises(self) -> None:
+        # 60 rows, all text < 10 chars → median well below 300
         rows = [
             {"permalink": f"p{i}", "text": "hi", "likes": 0,
              "comments": 0, "shares": 0, "publishDate": "1d"}
@@ -154,6 +154,64 @@ class TestNormalize:
         df = pd.DataFrame(rows)
         with pytest.raises(IngestError, match="tronqué"):
             normalize(df)
+
+    def test_truncation_guard_ellipsis_raises(self) -> None:
+        # 60 rows with long-ish text but all ending in "..." → ellipsis guard
+        rows = [
+            {"permalink": f"p{i}",
+             "text": ("x" * 400) + "...",  # long enough to pass median but clearly cut
+             "likes": 0, "comments": 0, "shares": 0, "publishDate": "1d"}
+            for i in range(60)
+        ]
+        df = pd.DataFrame(rows)
+        with pytest.raises(IngestError, match="tronqué"):
+            normalize(df)
+
+    def test_truncation_guard_passes_real_fixture(self, raw: pd.DataFrame) -> None:
+        # Real fixture must not trigger truncation guard (median ~1589 chars)
+        df = normalize(raw, author_filter=AUTHOR)
+        assert len(df) > 0  # no exception raised
+
+    def test_merge_never_shrinks_corpus(self, raw: pd.DataFrame) -> None:
+        # Ingest a partial export (first 60 rows of author's posts) on top of
+        # the full corpus → result must have at least as many posts as the full corpus
+        full = normalize(raw, author_filter=AUTHOR)
+        partial_raw = raw[raw["fullName"] == AUTHOR].head(60).copy()
+        # Make partial_raw a valid standalone export (rename fullName col stays)
+        merged = normalize(partial_raw, author_filter=AUTHOR, existing=full)
+        assert len(merged) >= len(full)
+
+    def test_merge_appends_new_posts(self) -> None:
+        # Create two non-overlapping sets; merging should give union
+        def _make_rows(start: int, n: int) -> list[dict]:
+            return [
+                {"permalink": f"p{i}", "text": "a" * 500, "likes": 1,
+                 "comments": 0, "shares": 0, "publishDate": "1d"}
+                for i in range(start, start + n)
+            ]
+        existing = normalize(pd.DataFrame(_make_rows(0, 60)))
+        new_raw = pd.DataFrame(_make_rows(60, 60))
+        merged = normalize(new_raw, existing=existing)
+        assert len(merged) == 120
+
+    def test_merge_existing_wins_on_duplicate(self) -> None:
+        # Same permalink, different likes → existing value preserved
+        rows = [
+            {"permalink": f"p{i}", "text": "a" * 500, "likes": 1,
+             "comments": 0, "shares": 0, "publishDate": "1d"}
+            for i in range(60)
+        ]
+        existing = normalize(pd.DataFrame(rows))
+        # Reimport same rows with different likes
+        rows2 = [
+            {"permalink": f"p{i}", "text": "a" * 500, "likes": 999,
+             "comments": 0, "shares": 0, "publishDate": "1d"}
+            for i in range(60)
+        ]
+        merged = normalize(pd.DataFrame(rows2), existing=existing)
+        # All rows should be from existing (likes=1), not reimport (likes=999)
+        assert len(merged) == 60
+        assert (merged["likes"] == 1).all()
 
     def test_deduplication(self) -> None:
         # Duplicate permalink should be deduplicated
@@ -202,6 +260,19 @@ class TestIngestToPath:
                                       dest=dest, snapshot_dir=snap_dir, author_filter=AUTHOR)
             assert summary["snapshot"] is not None
             assert Path(summary["snapshot"]).exists()
+
+    def test_merge_partial_export_never_shrinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "posts.csv"
+            content = FIXTURE_CSV.read_bytes()
+            # Full ingest
+            summary_full = ingest_to_path(content=content, filename="export.csv",
+                                           dest=dest, author_filter=AUTHOR)
+            n_full = summary_full["n_posts"]
+            # Partial re-ingest (same file — simulates a scroll that captured everything)
+            summary2 = ingest_to_path(content=content, filename="export.csv",
+                                       dest=dest, author_filter=AUTHOR)
+            assert summary2["n_posts"] >= n_full  # corpus never shrinks
 
     def test_atomic_write_no_tmp_left(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -260,7 +331,7 @@ class TestIngestEndpoint:
             data={"author": AUTHOR},
         )
         body = r.json()
-        for key in ("n_raw", "n_posts", "duplicates_removed",
+        for key in ("n_raw", "n_posts", "n_new", "duplicates_removed",
                     "tail_rate", "date_range", "destination"):
             assert key in body, f"missing key: {key}"
 

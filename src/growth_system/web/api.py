@@ -352,6 +352,7 @@ SNAPSHOT_DIR = DATA_DIR / "snapshots"
 class IngestResponse(BaseModel):
     n_raw: int
     n_posts: int
+    n_new: int
     duplicates_removed: int
     tail_rate: float
     date_range: str
@@ -373,10 +374,11 @@ async def ingest(
         # Validate without writing
         try:
             raw = load_raw(content, filename)
-            normalized = normalize(raw, author_filter=author)
+            existing = pd.read_csv(POSTS_CSV) if POSTS_CSV.exists() else None
+            normalized = normalize(raw, author_filter=author, existing=existing)
         except IngestError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
-        from growth_system.web.ingest import _parse_days_ago
+        n_existing = len(existing) if existing is not None else 0
         days = normalized["days_ago"].dropna()
         date_range = (
             f"{int(days.min())}–{int(days.max())} jours" if len(days) else "N/A"
@@ -384,7 +386,8 @@ async def ingest(
         return IngestResponse(
             n_raw=len(raw),
             n_posts=len(normalized),
-            duplicates_removed=len(raw) - len(normalized),
+            n_new=len(normalized) - n_existing,
+            duplicates_removed=len(raw) - (len(normalized) - n_existing),
             tail_rate=round(float((normalized["eng_score"] >= 98.2).mean()), 3),
             date_range=date_range,
             snapshot=None,

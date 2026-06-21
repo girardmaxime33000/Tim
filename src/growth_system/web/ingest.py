@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import io
 import re
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +19,9 @@ import pandas as pd
 
 REQUIRED_COLS = {"permalink", "text", "likes", "comments", "shares", "publishDate"}
 MIN_POSTS = 50
-MEDIAN_TEXT_LEN_MIN = 160  # below → suspect truncation
+MEDIAN_TEXT_LEN_MIN = 300   # export XLSX tronque autour de 160 chars — seuil conservateur
+TRUNCATION_ELLIPSIS_RE = re.compile(r"\.\.\.\s*$")
+TRUNCATION_FRAC_MAX = 0.20  # > 20 % de posts finissant par "…" → suspect
 
 _PUBLISH_DATE_RE = re.compile(
     r"^(?P<n>\d+)\s*(?P<unit>d|w|mo|yr)$", re.IGNORECASE
@@ -79,19 +81,44 @@ def load_raw(content: bytes, filename: str) -> pd.DataFrame:
     raise IngestError(f"Format non supporté : {ext}. Acceptés : csv, xlsx, json.")
 
 
+def _check_truncation(df: pd.DataFrame) -> None:
+    """Raise IngestError if the text column looks truncated."""
+    texts = df["text"].astype(str)
+    median_len = texts.str.len().median()
+    if median_len < MEDIAN_TEXT_LEN_MIN:
+        raise IngestError(
+            f"Texte suspect : médiane {median_len:.0f} chars < {MEDIAN_TEXT_LEN_MIN}. "
+            "L'export semble tronqué (préférez le format CSV, pas XLSX)."
+        )
+    ellipsis_frac = texts.apply(lambda t: bool(TRUNCATION_ELLIPSIS_RE.search(t))).mean()
+    if ellipsis_frac > TRUNCATION_FRAC_MAX:
+        raise IngestError(
+            f"{ellipsis_frac:.0%} des posts finissent par '…' — export tronqué détecté. "
+            "Scrollez jusqu'en bas de la page avant d'exporter."
+        )
+
+
 def normalize(
     raw: pd.DataFrame,
     author_filter: str | None = None,
+    existing: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Normalize a raw LinkedIn export DataFrame into the posts.csv schema.
 
+    If `existing` is provided, the result is the merge of existing posts and
+    the new export: existing rows are kept, new rows are appended, duplicates
+    (by permalink/hash) are removed. The corpus can only grow, never shrink.
+
     Steps:
-    1. Filter by author (fullName) if provided
-    2. Validate guardrails (≥50 posts, no truncation, required columns)
-    3. Deduplicate by permalink / text hash
-    4. Compute eng_score, days_ago, format
-    5. Return cleaned DataFrame
+    1. Validate required columns
+    2. Filter by author (fullName) if provided
+    3. Drop empty-text rows
+    4. Deduplicate by permalink / text hash
+    5. MIN_POSTS guardrail (on new rows; merged result always ≥ existing)
+    6. Truncation guardrail (on new rows)
+    7. Compute eng_score, days_ago, format
+    8. Merge with existing (union, existing wins on conflict)
 
     Raises IngestError on guardrail violation.
     """
@@ -110,11 +137,11 @@ def normalize(
     df["text"] = df["text"].fillna("").astype(str)
     df = df[df["text"].str.strip() != ""].copy()
 
-    # ── Step 4: deduplication by permalink / hash ───────────────────────────
+    # ── Step 4: deduplication within import ────────────────────────────────
     df["_dedup_key"] = df.apply(_permalink_or_hash, axis=1)
     df = df.drop_duplicates(subset=["_dedup_key"]).copy()
 
-    # ── Step 5: minimum posts guardrail ─────────────────────────────────────
+    # ── Step 5: minimum posts guardrail (on import, before merge) ───────────
     if len(df) < MIN_POSTS:
         raise IngestError(
             f"Seulement {len(df)} posts après filtrage — minimum requis : {MIN_POSTS}. "
@@ -122,36 +149,32 @@ def normalize(
         )
 
     # ── Step 6: truncation guardrail ────────────────────────────────────────
-    median_len = df["text"].str.len().median()
-    if median_len < MEDIAN_TEXT_LEN_MIN:
-        raise IngestError(
-            f"Texte suspect : médiane {median_len:.0f} chars < {MEDIAN_TEXT_LEN_MIN}. "
-            "L'export semble tronqué (utilisez le format CSV, pas XLSX)."
-        )
+    _check_truncation(df)
 
-    # ── Step 7: eng_score ───────────────────────────────────────────────────
+    # ── Step 7: eng_score, days_ago, format ─────────────────────────────────
     for col in ("likes", "comments", "shares"):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
     df["eng_score"] = df["likes"] + 3 * df["comments"] + 2 * df["shares"]
-
-    # ── Step 8: days_ago ────────────────────────────────────────────────────
     df["days_ago"] = df["publishDate"].apply(_parse_days_ago)
-
-    # ── Step 9: format ──────────────────────────────────────────────────────
     df["format"] = df.apply(_derive_format, axis=1)
-
-    # ── Step 10: permalink ──────────────────────────────────────────────────
     df["permalink"] = df["_dedup_key"]
 
-    # ── Final: select output columns ────────────────────────────────────────
     out_cols = ["permalink", "text", "likes", "comments", "shares",
                 "eng_score", "days_ago", "format"]
-    # Keep optional columns if present
     for opt in ("fullName", "images", "videoUrl", "documentUrl"):
         if opt in df.columns:
             out_cols.append(opt)
+    df = df[out_cols].copy()
 
-    return df[out_cols].reset_index(drop=True)
+    # ── Step 8: merge with existing corpus ──────────────────────────────────
+    if existing is not None and len(existing) > 0:
+        # Existing rows take priority; only truly new permalinks are appended
+        existing_keys = set(existing["permalink"].astype(str))
+        new_rows = df[~df["permalink"].isin(existing_keys)]
+        merged = pd.concat([existing, new_rows], ignore_index=True)
+        return merged
+
+    return df.reset_index(drop=True)
 
 
 def ingest_to_path(
@@ -162,16 +185,24 @@ def ingest_to_path(
     author_filter: str | None = None,
 ) -> dict[str, Any]:
     """
-    Full ingest pipeline: parse → normalize → snapshot existing → atomic write.
+    Full ingest pipeline: parse → normalize (merge with existing) → snapshot → atomic write.
 
-    Returns a summary dict (n_posts, date_range, tail_rate, duplicates_removed).
-    Never writes dest unless all guardrails pass.
+    Returns a summary dict. Never writes dest unless all guardrails pass.
+    The corpus can only grow: a partial re-export never silently drops posts.
     """
     raw = load_raw(content, filename)
     n_raw = len(raw)
 
-    normalized = normalize(raw, author_filter=author_filter)
+    # Load existing corpus for merge
+    existing: pd.DataFrame | None = None
+    n_existing = 0
+    if dest.exists():
+        existing = pd.read_csv(dest)
+        n_existing = len(existing)
+
+    normalized = normalize(raw, author_filter=author_filter, existing=existing)
     n_out = len(normalized)
+    n_new = n_out - n_existing
 
     # Snapshot existing file before overwrite
     snapshotted: str | None = None
@@ -189,7 +220,6 @@ def ingest_to_path(
     normalized.to_csv(tmp, index=False)
     tmp.rename(dest)
 
-    # Summary stats
     tail_rate = float((normalized["eng_score"] >= 98.2).mean())
     days = normalized["days_ago"].dropna()
     date_range = (
@@ -199,7 +229,8 @@ def ingest_to_path(
     return {
         "n_raw": n_raw,
         "n_posts": n_out,
-        "duplicates_removed": n_raw - n_out,
+        "n_new": n_new,
+        "duplicates_removed": n_raw - (n_out - n_existing),
         "tail_rate": round(tail_rate, 3),
         "date_range": date_range,
         "snapshot": snapshotted,
