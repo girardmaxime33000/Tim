@@ -50,7 +50,47 @@ Dépendances : `numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`, `pydant
 
 ---
 
-## Quickstart
+## Interface web — démarrage rapide
+
+```bash
+growth serve
+```
+
+Ouvre automatiquement `http://127.0.0.1:8000` dans le navigateur.
+**Tout le workflow quotidien se fait depuis l'interface** — aucune autre
+commande requise.
+
+```
+growth serve [--host 127.0.0.1] [--port 8000] [--no-open]
+```
+
+### Flux web quotidien
+
+```
+Onglet Profil/MAJ  → déposer l'export CSV de l'extension li-posts-export
+                     → ingestion + snapshot automatique
+Onglet Scoreur     → coller le brouillon → P(queue), verdict, suggestions
+Onglet Bandit      → recommander l'archétype du jour
+                   → enregistrer le résultat après publication
+Onglet Monitoring  → graphes audience, alarmes CUSUM
+Onglet Leads       → saisir les leads manuellement + lancer le backtest
+```
+
+### Mettre à jour le corpus LinkedIn
+
+1. Ouvrir l'extension **li-posts-export** sur le profil de Timothée Roy.
+2. Lancer l'export **CSV** (format recommandé — texte intégral garanti).
+3. Déposer le fichier dans l'onglet **Profil/MAJ** de l'interface web.
+4. L'API ingère, déduplique (max engagement gagne sur doublon), crée un
+   snapshot horodaté dans `data/snapshots/`, et met à jour `data/posts.csv`.
+
+> Un export partiel (< 50 posts après filtrage) est refusé avec un message
+> explicite. Le corpus ne peut que croître — un re-export partiel n'écrase
+> jamais les posts existants.
+
+---
+
+## Quickstart CLI
 
 ### Scorer un brouillon
 
@@ -163,7 +203,15 @@ Avec données CRM réelles : P2 ≥ P1 ≥ P0 est attendu, car le bandit à esco
 
 ---
 
-## Usage en production (boucle quotidienne)
+## Usage en production
+
+### Via l'interface web (recommandé)
+
+```bash
+growth serve   # tout depuis le navigateur
+```
+
+### Via la CLI
 
 ```
 1. growth recommend              → archétype cible du jour
@@ -176,12 +224,18 @@ Avec données CRM réelles : P2 ≥ P1 ≥ P0 est attendu, car le bandit à esco
 
 L'état du bandit est sérialisé dans `growth_state.json` entre les sessions.
 
+### Pont extension → API (Option B, avancé)
+
+Pour envoyer les exports directement depuis le navigateur sans manipulation
+de fichier, voir [`docs/extension_bridge.md`](docs/extension_bridge.md)
+(userscript Tampermonkey ou mini-extension Chrome maison).
+
 ---
 
 ## Tests
 
 ```bash
-pytest tests/ -v          # 33 tests, ~0.5s
+pytest tests/ -v          # 130 tests
 ```
 
 | Suite | Tests | Critère bloquant validé |
@@ -192,6 +246,9 @@ pytest tests/ -v          # 33 tests, ~0.5s
 | `test_changepoint.py` | 3 | CUSUM détecte rupture 25/05/2026 à ±10 jours |
 | `test_reward.py` | 5 | Post appât < post qualité à engagement égal |
 | `test_orchestrator.py` | 6 | Boucle complète, save/load état |
+| `test_web_api.py` | 31 | Tous les endpoints jalon 1 (health/profile/score/recommend/update) |
+| `test_web_ingest.py` | 39 | Ingest sur fixture réelle, merge, garde-fous, atomicité |
+| `test_web_jalon3.py` | 27 | Monitor / Leads / Backtest |
 
 ---
 

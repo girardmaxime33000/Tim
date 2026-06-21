@@ -87,7 +87,7 @@ def run_backtest(
 
     def compute_reward(row: pd.Series) -> float:  # type: ignore[type-arg]
         outcome = PostOutcome(
-            post_id=str(row["post_index"]),
+            post_id=str(row.get("post_index", row.name)),
             text=str(row["text"]),
             eng_score=float(row["eng_score"]),
             eng_q80=eng_q80,
