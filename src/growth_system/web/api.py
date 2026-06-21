@@ -412,6 +412,238 @@ async def ingest(
     return IngestResponse(**summary)
 
 
+# ---------------------------------------------------------------------------
+# Endpoints — Jalon 3
+# ---------------------------------------------------------------------------
+
+
+class AlarmItem(BaseModel):
+    date: str
+    direction: str
+    statistic: float
+
+
+class MonitorResponse(BaseModel):
+    dates: list[str]
+    new_followers_smooth: list[float]
+    impressions: list[float]
+    alarms: list[AlarmItem]
+    retrain_recommended: bool
+    days_since_last_alarm: int | None
+    totals: dict[str, float]
+
+
+@app.get("/api/monitor", response_model=MonitorResponse)
+def monitor() -> MonitorResponse:
+    """Run CUSUM on daily_audience.csv and return the time series + alarms."""
+    if not AUDIENCE_CSV.exists():
+        raise HTTPException(status_code=404, detail="daily_audience.csv introuvable.")
+
+    df = pd.read_csv(AUDIENCE_CSV, parse_dates=["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+
+    smooth = df["new_followers"].rolling(14, min_periods=1).mean()
+    calib = smooth.iloc[:60]
+    mu0 = float(calib.mean())
+    sigma = max(float(calib.std()), 1e-3)
+
+    from growth_system.changepoint import CusumDetector
+    detector = CusumDetector(mu0=mu0, k=0.5 * sigma, h=4.5 * sigma)
+    alarms: list[AlarmItem] = []
+    for _, row in df.iterrows():
+        cp = detector.update(float(smooth[row.name]), row["date"].date())
+        if cp:
+            alarms.append(AlarmItem(
+                date=str(cp.detected_date),
+                direction=cp.direction,
+                statistic=round(cp.statistic, 3),
+            ))
+
+    days_since: int | None = None
+    retrain = False
+    if alarms:
+        from datetime import date as _date
+        import datetime
+        last = datetime.date.fromisoformat(alarms[-1].date)
+        days_since = (datetime.date.today() - last).days
+        retrain = days_since <= 90
+
+    return MonitorResponse(
+        dates=[str(d.date()) for d in df["date"]],
+        new_followers_smooth=[round(float(v), 2) for v in smooth],
+        impressions=[float(v) for v in df["impressions"]],
+        alarms=alarms,
+        retrain_recommended=retrain,
+        days_since_last_alarm=days_since,
+        totals={
+            "impressions": round(float(df["impressions"].sum()), 0),
+            "new_followers": round(float(df["new_followers"].sum()), 0),
+            "avg_daily_impressions": round(float(df["impressions"].mean()), 1),
+        },
+    )
+
+
+class LeadItem(BaseModel):
+    post_id: str
+    qualified_contacts: int = Field(..., ge=0)
+
+
+class LeadsResponse(BaseModel):
+    leads: list[LeadItem]
+    total_leads: int
+
+
+class LeadUpsertResponse(BaseModel):
+    post_id: str
+    qualified_contacts: int
+    action: str  # "created" or "updated"
+
+
+@app.get("/api/leads", response_model=LeadsResponse)
+def get_leads() -> LeadsResponse:
+    """Return all manually-entered leads."""
+    if not LEADS_CSV.exists():
+        return LeadsResponse(leads=[], total_leads=0)
+    df = pd.read_csv(LEADS_CSV)
+    items = [
+        LeadItem(post_id=str(r["post_id"]), qualified_contacts=int(r["qualified_contacts"]))
+        for _, r in df.iterrows()
+    ]
+    return LeadsResponse(leads=items, total_leads=sum(i.qualified_contacts for i in items))
+
+
+@app.post("/api/leads", response_model=LeadUpsertResponse)
+def upsert_lead(req: LeadItem) -> LeadUpsertResponse:
+    """Add or update a lead entry (upsert by post_id)."""
+    rows: list[dict[str, Any]] = []
+    if LEADS_CSV.exists():
+        rows = pd.read_csv(LEADS_CSV).to_dict("records")
+    action = "created"
+    found = False
+    for row in rows:
+        if str(row.get("post_id")) == req.post_id:
+            row["qualified_contacts"] = req.qualified_contacts
+            found = True
+            action = "updated"
+            break
+    if not found:
+        rows.append({"post_id": req.post_id, "qualified_contacts": req.qualified_contacts})
+
+    df = pd.DataFrame(rows)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    import tempfile, shutil
+    with tempfile.NamedTemporaryFile(mode="w", dir=DATA_DIR, suffix=".tmp", delete=False) as tmp:
+        df.to_csv(tmp, index=False)
+        tmp_path = tmp.name
+    shutil.move(tmp_path, str(LEADS_CSV))
+
+    return LeadUpsertResponse(post_id=req.post_id,
+                               qualified_contacts=req.qualified_contacts,
+                               action=action)
+
+
+class BacktestResponse(BaseModel):
+    total_reward_P0: float
+    total_reward_P1: float
+    total_reward_P2: float
+    regret_P2_vs_P0: float
+    changepoints_detected: list[str]
+    p2_beats_p1: bool
+    p1_beats_p0: bool
+    plot_path: str
+    leads_csv_empty: bool
+    # Series for frontend charts
+    dates: list[str]
+    cum_reward_P0: list[float]
+    cum_reward_P1: list[float]
+    cum_reward_P2: list[float]
+    regret: list[float]
+    posteriors_over_time: list[dict[str, float]]
+
+
+@app.post("/api/backtest", response_model=BacktestResponse)
+def run_backtest_endpoint() -> BacktestResponse:
+    """Run the 3-policy backtest and return curves + summary."""
+    if not POSTS_CSV.exists():
+        raise HTTPException(status_code=404, detail="posts.csv introuvable.")
+    if not AUDIENCE_CSV.exists():
+        raise HTTPException(status_code=404, detail="daily_audience.csv introuvable.")
+    if not MODEL_PATH.exists():
+        raise HTTPException(status_code=404, detail="scorer_model.json introuvable.")
+
+    leads_empty = not LEADS_CSV.exists() or pd.read_csv(LEADS_CSV).empty if LEADS_CSV.exists() else True
+
+    plot_path = str(DATA_DIR / "backtest_results.png")
+
+    from growth_system.backtest import run_backtest, REFERENCE_DATE
+    from datetime import timedelta
+    import numpy as np
+
+    # Run the standard backtest (produces PNG + summary dict)
+    summary = run_backtest(
+        posts_path=str(POSTS_CSV),
+        audience_path=str(AUDIENCE_CSV),
+        model_path=str(MODEL_PATH),
+        output_path=plot_path,
+    )
+
+    # Rebuild series for the frontend (avoid re-running full backtest)
+    posts_df = pd.read_csv(POSTS_CSV)
+    posts_df = posts_df.sort_values("days_ago", ascending=False).reset_index(drop=True)
+    posts_df["publish_date"] = posts_df["days_ago"].apply(
+        lambda d: REFERENCE_DATE - timedelta(days=int(d))
+    )
+    posts_df["text"] = posts_df["text"].fillna("")
+    eng_q80 = 98.2
+    posts_df["in_tail"] = (posts_df["eng_score"] >= eng_q80).astype(float)
+
+    from growth_system.reward import BusinessReward, PostOutcome, ProxyLeadSource, RewardWeights
+    from growth_system.bandit import DiscountedThompsonBandit
+    from growth_system.archetypes import ALL_ARMS, archetype_of
+
+    reward_fn = BusinessReward(RewardWeights(), ProxyLeadSource())
+
+    def _reward(row: pd.Series) -> float:
+        return reward_fn.compute(PostOutcome(
+            post_id=str(row.name), text=str(row["text"]),
+            eng_score=float(row["eng_score"]), eng_q80=eng_q80,
+        ))
+
+    rewards = posts_df.apply(_reward, axis=1).values
+    cum0 = list(np.cumsum(rewards).round(4))
+
+    bandit1 = DiscountedThompsonBandit(ALL_ARMS, gamma=1.0, seed=43)
+    bandit2 = DiscountedThompsonBandit(ALL_ARMS, gamma=0.985, seed=44)
+    r1_arr, r2_arr, post_series = [], [], []
+    for i, row in posts_df.iterrows():
+        arm = archetype_of(str(row["text"]))
+        r = rewards[int(i)]
+        bandit1.update(arm, r)
+        bandit2.update(arm, r)
+        r1_arr.append(r)
+        r2_arr.append(r)
+        post_series.append({a: round(bandit2.posterior()[a][0] /
+                                      (bandit2.posterior()[a][0] + bandit2.posterior()[a][1]), 3)
+                             for a in ALL_ARMS})
+
+    cum1 = list(np.cumsum(r1_arr).round(4))
+    cum2 = list(np.cumsum(r2_arr).round(4))
+    regret = [round(float(c0 - c2), 4) for c0, c2 in zip(cum0, cum2)]
+    dates = [str(d) for d in posts_df["publish_date"]]
+
+    return BacktestResponse(
+        **{k: summary[k] for k in summary},
+        plot_path=plot_path,
+        leads_csv_empty=leads_empty,
+        dates=dates,
+        cum_reward_P0=[round(float(v), 4) for v in cum0],
+        cum_reward_P1=[round(float(v), 4) for v in cum1],
+        cum_reward_P2=[round(float(v), 4) for v in cum2],
+        regret=regret,
+        posteriors_over_time=post_series,
+    )
+
+
 def _append_lead(post_id: str, leads: int) -> None:
     """Atomically append a lead entry to leads.csv."""
     import tempfile, shutil
