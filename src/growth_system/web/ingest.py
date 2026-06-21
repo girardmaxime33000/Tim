@@ -19,6 +19,7 @@ import pandas as pd
 
 REQUIRED_COLS = {"permalink", "text", "likes", "comments", "shares", "publishDate"}
 MIN_POSTS = 50
+ENG_Q80 = 98.2  # frozen from scorer_model.json; must not be recalculated on import
 MEDIAN_TEXT_LEN_MIN = 300   # export XLSX tronque autour de 160 chars — seuil conservateur
 TRUNCATION_ELLIPSIS_RE = re.compile(r"\.\.\.\s*$")
 TRUNCATION_FRAC_MAX = 0.20  # > 20 % de posts finissant par "…" → suspect
@@ -134,6 +135,8 @@ def normalize(
         df = df[df["fullName"] == author_filter].copy()
 
     # ── Step 3: drop rows with empty text ───────────────────────────────────
+    # Posts without text are inscoreable and unclassifiable by archetype.
+    # They are intentionally excluded rather than kept as unlabelled negatives.
     df["text"] = df["text"].fillna("").astype(str)
     df = df[df["text"].str.strip() != ""].copy()
 
@@ -168,10 +171,22 @@ def normalize(
 
     # ── Step 8: merge with existing corpus ──────────────────────────────────
     if existing is not None and len(existing) > 0:
-        # Existing rows take priority; only truly new permalinks are appended
-        existing_keys = set(existing["permalink"].astype(str))
-        new_rows = df[~df["permalink"].isin(existing_keys)]
-        merged = pd.concat([existing, new_rows], ignore_index=True)
+        # Union on permalink. On conflict, keep the row with higher eng_score:
+        # LinkedIn engagement is monotonically non-decreasing, so the higher
+        # value is always the more recent scrape. This prevents posts scraped
+        # early (low likes) from being frozen below the queue threshold forever.
+        existing_indexed = existing.set_index("permalink")
+        df_indexed = df.set_index("permalink")
+
+        # Start from existing; update rows where new export has higher eng_score
+        shared = existing_indexed.index.intersection(df_indexed.index)
+        for pk in shared:
+            if df_indexed.loc[pk, "eng_score"] > existing_indexed.loc[pk, "eng_score"]:
+                existing_indexed.loc[pk] = df_indexed.loc[pk]
+
+        # Append genuinely new rows
+        truly_new = df_indexed[~df_indexed.index.isin(existing_indexed.index)]
+        merged = pd.concat([existing_indexed, truly_new]).reset_index()
         return merged
 
     return df.reset_index(drop=True)
@@ -220,7 +235,7 @@ def ingest_to_path(
     normalized.to_csv(tmp, index=False)
     tmp.rename(dest)
 
-    tail_rate = float((normalized["eng_score"] >= 98.2).mean())
+    tail_rate = float((normalized["eng_score"] >= ENG_Q80).mean())
     days = normalized["days_ago"].dropna()
     date_range = (
         f"{int(days.min())}–{int(days.max())} jours" if len(days) else "N/A"

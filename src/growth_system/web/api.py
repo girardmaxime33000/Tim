@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from growth_system.archetypes import ALL_ARMS, ArmId, archetype_of
-from growth_system.web.ingest import IngestError, ingest_to_path, load_raw, normalize
+from growth_system.web.ingest import ENG_Q80, IngestError, ingest_to_path, load_raw, normalize
 from growth_system.bandit import DiscountedThompsonBandit
 from growth_system.changepoint import CusumDetector
 from growth_system.config import SystemConfig
@@ -388,7 +388,7 @@ async def ingest(
             n_posts=len(normalized),
             n_new=len(normalized) - n_existing,
             duplicates_removed=len(raw) - (len(normalized) - n_existing),
-            tail_rate=round(float((normalized["eng_score"] >= 98.2).mean()), 3),
+            tail_rate=round(float((normalized["eng_score"] >= ENG_Q80).mean()), 3),
             date_range=date_range,
             snapshot=None,
             destination="(dry-run — aucune écriture)",

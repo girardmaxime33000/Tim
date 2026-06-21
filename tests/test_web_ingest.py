@@ -194,24 +194,42 @@ class TestNormalize:
         merged = normalize(new_raw, existing=existing)
         assert len(merged) == 120
 
-    def test_merge_existing_wins_on_duplicate(self) -> None:
-        # Same permalink, different likes → existing value preserved
-        rows = [
-            {"permalink": f"p{i}", "text": "a" * 500, "likes": 1,
+    def test_merge_keeps_higher_engagement(self) -> None:
+        # Same permalink: existing has low engagement, new export has higher.
+        # The higher value (more recent scrape) must win so viral posts
+        # are not frozen below the queue threshold forever.
+        rows_low = [
+            {"permalink": f"p{i}", "text": "a" * 500, "likes": 5,
              "comments": 0, "shares": 0, "publishDate": "1d"}
             for i in range(60)
         ]
-        existing = normalize(pd.DataFrame(rows))
-        # Reimport same rows with different likes
-        rows2 = [
-            {"permalink": f"p{i}", "text": "a" * 500, "likes": 999,
+        existing = normalize(pd.DataFrame(rows_low))
+        rows_high = [
+            {"permalink": f"p{i}", "text": "a" * 500, "likes": 200,
              "comments": 0, "shares": 0, "publishDate": "1d"}
             for i in range(60)
         ]
-        merged = normalize(pd.DataFrame(rows2), existing=existing)
-        # All rows should be from existing (likes=1), not reimport (likes=999)
+        merged = normalize(pd.DataFrame(rows_high), existing=existing)
         assert len(merged) == 60
-        assert (merged["likes"] == 1).all()
+        # eng_score should reflect the higher likes (200, not 5)
+        assert (merged["eng_score"] == 200).all()
+
+    def test_merge_existing_wins_when_higher(self) -> None:
+        # If existing has higher engagement than re-import, existing is kept.
+        rows_high = [
+            {"permalink": f"p{i}", "text": "a" * 500, "likes": 200,
+             "comments": 0, "shares": 0, "publishDate": "1d"}
+            for i in range(60)
+        ]
+        existing = normalize(pd.DataFrame(rows_high))
+        rows_low = [
+            {"permalink": f"p{i}", "text": "a" * 500, "likes": 5,
+             "comments": 0, "shares": 0, "publishDate": "1d"}
+            for i in range(60)
+        ]
+        merged = normalize(pd.DataFrame(rows_low), existing=existing)
+        assert len(merged) == 60
+        assert (merged["eng_score"] == 200).all()
 
     def test_deduplication(self) -> None:
         # Duplicate permalink should be deduplicated
