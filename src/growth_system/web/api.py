@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from growth_system.archetypes import ALL_ARMS, ArmId, archetype_of
+from growth_system.leads_attribution import normalize_post_id
 from growth_system.features import has_cta, has_link, hook_type_label, extract_features
 from growth_system.web.ingest import ENG_Q80, IngestError, ingest_to_path, load_raw, normalize
 from growth_system.bandit import DiscountedThompsonBandit
@@ -723,6 +724,7 @@ def get_leads() -> LeadsResponse:
 @app.post("/api/leads", response_model=LeadUpsertResponse)
 def upsert_lead(req: LeadItem) -> LeadUpsertResponse:
     """Add or update a lead entry (upsert by post_id)."""
+    req.post_id = normalize_post_id(req.post_id)
     rows: list[dict[str, Any]] = []
     if LEADS_CSV.exists():
         rows = pd.read_csv(LEADS_CSV).to_dict("records")
@@ -1336,10 +1338,13 @@ async def attribute_leads(
             pf = pf.dropna(subset=["post_date"])
             posts_for_attr = pf[["permalink", "post_date", "eng_score"]].copy()
             posts_for_attr = posts_for_attr.rename(columns={"permalink": "post_id"})
+            posts_for_attr["post_id"] = posts_for_attr["post_id"].apply(normalize_post_id)
 
             # Enrichissement avec dates exactes (AggregateAnalytics MEILLEURS POSTS)
             from growth_system.leads_attribution import load_analytics_post_dates
             analytics_dates = load_analytics_post_dates(ANALYTICS_DIR)
+            # Normaliser les clés du dict analytics
+            analytics_dates = {normalize_post_id(k): v for k, v in analytics_dates.items()}
             if analytics_dates:
                 for idx, post_row in posts_for_attr.iterrows():
                     pid = str(post_row["post_id"])
@@ -1484,10 +1489,11 @@ def apply_leads(req: ApplyLeadsRequest) -> ApplyLeadsResponse:
     }
 
     for item in req.proposed_leads_csv:
+        pid = normalize_post_id(item.post_id)
         if req.merge_strategy == "add":
-            existing_map[item.post_id] = existing_map.get(item.post_id, 0.0) + item.qualified_contacts
+            existing_map[pid] = existing_map.get(pid, 0.0) + item.qualified_contacts
         else:  # "replace"
-            existing_map[item.post_id] = item.qualified_contacts
+            existing_map[pid] = item.qualified_contacts
 
     # --- Écriture atomique ---
     merged_rows = [
@@ -1512,6 +1518,7 @@ def apply_leads(req: ApplyLeadsRequest) -> ApplyLeadsResponse:
 def _append_lead(post_id: str, leads: int) -> None:
     """Atomically append a lead entry to leads.csv."""
     import tempfile, shutil
+    post_id = normalize_post_id(post_id)
     rows: list[dict[str, Any]] = []
     if LEADS_CSV.exists():
         rows = pd.read_csv(LEADS_CSV).to_dict("records")

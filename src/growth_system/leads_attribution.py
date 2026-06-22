@@ -17,6 +17,30 @@ import pandas as pd
 
 
 # ---------------------------------------------------------------------------
+# Normalisation post_id
+# ---------------------------------------------------------------------------
+
+_ACTIVITY_RE = re.compile(r'(\d{15,22})')
+
+def normalize_post_id(raw: str) -> str:
+    """Retourne la forme canonique d'un post_id LinkedIn.
+
+    Forme canonique : activity_id numérique seul (15-22 chiffres).
+    Exemples qui donnent tous le même résultat :
+      - "7464594459641548802"
+      - "https://www.linkedin.com/posts/foo_bar-7464594459641548802"
+      - "https://www.linkedin.com/feed/update/urn:li:activity:7464594459641548802"
+      - "https://...?utm_source=share&rcm=ACoAAA..."
+      - "urn:li:activity:7464594459641548802"
+    Si aucun activity_id n'est trouvé, retourne raw.strip() tel quel (fallback sûr,
+    jamais d'erreur, jamais de perte silencieuse).
+    """
+    s = str(raw).strip()
+    m = _ACTIVITY_RE.search(s)
+    return m.group(1) if m else s
+
+
+# ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
 

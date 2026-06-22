@@ -14,6 +14,7 @@ from growth_system.leads_attribution import (
     AttributionResult,
     aggregate_attribution,
     attribute_lead_to_post,
+    normalize_post_id,
     parse_lead_date,
 )
 
@@ -534,3 +535,61 @@ def test_endpoint_fiabilite_date_post_approximate(tmp_path: Path, monkeypatch: p
     assert body["n_leads_attributed"] == 1
     detail = body["detail"][0]
     assert detail["fiabilite_date_post"] == "approximative (reconstruite)"
+
+
+# ---------------------------------------------------------------------------
+# normalize_post_id — dédoublonnage de clé
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_post_id_bare_id():
+    assert normalize_post_id("7464594459641548802") == "7464594459641548802"
+
+
+def test_normalize_post_id_full_url():
+    url = "https://www.linkedin.com/posts/foo_bar-7464594459641548802"
+    assert normalize_post_id(url) == "7464594459641548802"
+
+
+def test_normalize_post_id_urn():
+    urn = "urn:li:activity:7464594459641548802"
+    assert normalize_post_id(urn) == "7464594459641548802"
+
+
+def test_normalize_post_id_url_with_utm():
+    url = "https://www.linkedin.com/posts/foo-7464594459641548802?utm_source=share&rcm=ACoAAA"
+    assert normalize_post_id(url) == "7464594459641548802"
+
+
+def test_normalize_post_id_fallback_no_digits():
+    raw = "pas-de-chiffres"
+    assert normalize_post_id(raw) == "pas-de-chiffres"
+
+
+def test_upsert_lead_deduplication_by_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """POST /api/leads avec deux formes d'URL pour le même post → une seule ligne dans leads.csv."""
+    import growth_system.web.api as api_mod
+    monkeypatch.setattr(api_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(api_mod, "LEADS_CSV", tmp_path / "leads.csv")
+
+    from fastapi.testclient import TestClient
+    from growth_system.web.api import app
+    client = TestClient(app)
+
+    activity_id = "7464594459641548802"
+    url_clean = f"https://www.linkedin.com/posts/timothee-roy-{activity_id}"
+    url_utm = f"https://www.linkedin.com/posts/timothee-roy-{activity_id}?utm_source=share"
+
+    r1 = client.post("/api/leads", json={"post_id": url_clean, "qualified_contacts": 3})
+    assert r1.status_code == 200
+    assert r1.json()["action"] == "created"
+    assert r1.json()["post_id"] == activity_id
+
+    r2 = client.post("/api/leads", json={"post_id": url_utm, "qualified_contacts": 5})
+    assert r2.status_code == 200
+    assert r2.json()["action"] == "updated"
+
+    df = pd.read_csv(tmp_path / "leads.csv")
+    assert len(df) == 1, f"Attendu 1 ligne, obtenu {len(df)}"
+    assert str(df.iloc[0]["post_id"]) == activity_id
+    assert int(df.iloc[0]["qualified_contacts"]) == 5
