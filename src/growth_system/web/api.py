@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from growth_system.archetypes import ALL_ARMS, ArmId, archetype_of
+from growth_system.features import has_cta, has_link, hook_type_label, extract_features
 from growth_system.web.ingest import ENG_Q80, IngestError, ingest_to_path, load_raw, normalize
 from growth_system.bandit import DiscountedThompsonBandit
 from growth_system.changepoint import CusumDetector
@@ -643,7 +644,7 @@ def run_backtest_endpoint() -> BacktestResponse:
     regret = [round(float(c0 - c2), 4) for c0, c2 in zip(cum0, cum2)]
     dates = [str(d) for d in posts_df["publish_date"]]
 
-    return BacktestResponse(
+    response = BacktestResponse(
         **{k: summary[k] for k in summary},
         plot_path=plot_path,
         leads_csv_empty=leads_empty,
@@ -654,6 +655,263 @@ def run_backtest_endpoint() -> BacktestResponse:
         regret=regret,
         posteriors_over_time=post_series,
     )
+
+    # Persist posteriors for /api/monitor/figures (figure 3 — bandit evolution)
+    _bt_path = DATA_DIR / "backtest_posteriors.json"
+    _bt_tmp = _bt_path.with_suffix(".tmp")
+    with open(_bt_tmp, "w") as _f:
+        json.dump({"dates": dates, "posteriors": post_series}, _f)
+    _bt_tmp.rename(_bt_path)
+
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Helpers — post table
+# ---------------------------------------------------------------------------
+
+_INGEST_REF_DATE = date(2026, 6, 22)  # date of the most recent ingest (approximation)
+
+SORT_FIELDS = {
+    "date": "days_ago",
+    "eng_score": "eng_score",
+    "likes": "likes",
+    "comments": "comments",
+    "shares": "shares",
+    "text_len": "text_len",
+}
+
+
+def _build_post_row(idx: int, row: "pd.Series") -> dict:  # type: ignore[type-arg]
+    import datetime
+    text = str(row.get("text", ""))
+    days = row.get("days_ago")
+    if days is not None and not pd.isna(days):
+        abs_date = (_INGEST_REF_DATE - datetime.timedelta(days=int(days))).isoformat()
+    else:
+        abs_date = None
+    feats = extract_features(text)
+    return {
+        "rank": idx + 1,
+        "excerpt": text[:160],
+        "date": abs_date,
+        "format": str(row.get("format", "")),
+        "hook_type": hook_type_label(text),
+        "likes": int(row.get("likes", 0)),
+        "comments": int(row.get("comments", 0)),
+        "shares": int(row.get("shares", 0)),
+        "eng_score": float(row.get("eng_score", 0)),
+        "text_len": len(text),
+        "emoji": int(feats["emoji"]),
+        "has_link": has_link(text),
+        "has_cta": has_cta(text),
+        "permalink": str(row.get("permalink", "")),
+    }
+
+
+class PostRow(BaseModel):
+    rank: int
+    excerpt: str
+    date: str | None
+    format: str
+    hook_type: str
+    likes: int
+    comments: int
+    shares: int
+    eng_score: float
+    text_len: int
+    emoji: int
+    has_link: bool
+    has_cta: bool
+    permalink: str
+
+
+class PostsResponse(BaseModel):
+    posts: list[PostRow]
+    total: int
+    limit: int
+    offset: int
+
+
+@app.get("/api/posts", response_model=PostsResponse)
+def get_posts(
+    sort_by: str = "date",
+    order: str = "desc",
+    format: str | None = None,
+    hook_type: str | None = None,
+    has_cta_filter: bool | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> PostsResponse:
+    """Return the post corpus as a table with derived display columns."""
+    if not POSTS_CSV.exists():
+        return PostsResponse(posts=[], total=0, limit=limit, offset=offset)
+
+    df = pd.read_csv(POSTS_CSV)
+    df["text"] = df["text"].fillna("").astype(str)
+
+    # Derived columns for filtering/sorting
+    df["text_len"] = df["text"].str.len()
+    df["hook_type_col"] = df["text"].apply(hook_type_label)
+    df["has_cta_col"] = df["text"].apply(has_cta)
+
+    # Filters
+    if format:
+        df = df[df["format"] == format]
+    if hook_type:
+        df = df[df["hook_type_col"] == hook_type]
+    if has_cta_filter is not None:
+        df = df[df["has_cta_col"] == has_cta_filter]
+
+    # Sort
+    sort_col = SORT_FIELDS.get(sort_by, "days_ago")
+    if sort_col not in df.columns:
+        sort_col = "days_ago"
+    ascending = order == "asc"
+    # days_ago desc = oldest dates last = chronological asc when sort_by=date
+    if sort_by == "date":
+        ascending = not ascending  # invert: smaller days_ago = more recent
+    df = df.sort_values(sort_col, ascending=ascending, na_position="last")
+
+    total = len(df)
+    df = df.iloc[offset: offset + limit].reset_index(drop=True)
+
+    posts = [PostRow(**_build_post_row(i, row)) for i, row in df.iterrows()]
+    return PostsResponse(posts=posts, total=total, limit=limit, offset=offset)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint — Plotly figures
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/monitor/figures")
+def monitor_figures() -> dict:  # type: ignore[type-arg]
+    """Return 4 Plotly figures as JSON for the Monitoring tab."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    figures: dict[str, str] = {}
+
+    # ── Figure 1: growth — λ(t) + impressions ───────────────────────────────
+    if AUDIENCE_CSV.exists():
+        df = pd.read_csv(AUDIENCE_CSV, parse_dates=["date"])
+        df = df.sort_values("date").reset_index(drop=True)
+        smooth = df["new_followers"].rolling(14, min_periods=1).mean()
+
+        # Rerun CUSUM to get alarms for annotation
+        from growth_system.changepoint import CusumDetector as _CD
+        _det = _CD(mu0=float(smooth.iloc[:60].mean()),
+                   k=0.5 * max(float(smooth.iloc[:60].std()), 1e-3),
+                   h=4.5 * max(float(smooth.iloc[:60].std()), 1e-3))
+        alarms = []
+        for _, row in df.iterrows():
+            cp = _det.update(float(smooth[row.name]), row["date"].date())
+            if cp:
+                alarms.append(cp)
+
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(go.Scatter(
+            x=df["date"], y=smooth.round(2),
+            name="Abonnés/j (lissé 14j)", line={"color": "#E8540A", "width": 2},
+        ), secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=df["date"], y=df["impressions"],
+            name="Impressions/j", line={"color": "#4A90D9", "width": 1},
+            opacity=0.6,
+        ), secondary_y=True)
+        for cp in alarms:
+            fig.add_vline(x=str(cp.detected_date), line_dash="dot",
+                          line_color="orange", annotation_text=f"CUSUM {cp.direction}",
+                          annotation_font_color="orange")
+        fig.update_layout(
+            template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
+            title="Dynamique d'audience", legend={"orientation": "h"},
+            margin={"t": 50, "b": 40},
+        )
+        fig.update_yaxes(title_text="Abonnés/j", secondary_y=False)
+        fig.update_yaxes(title_text="Impressions", secondary_y=True)
+        figures["growth"] = fig.to_json()
+
+    # ── Figure 2: distribution eng_score ─────────────────────────────────────
+    if POSTS_CSV.exists():
+        df_p = pd.read_csv(POSTS_CSV)
+        fig2 = go.Figure()
+        fig2.add_trace(go.Histogram(
+            x=df_p["eng_score"], nbinsx=30,
+            marker_color="#E8540A", opacity=0.8, name="Eng. Score",
+        ))
+        fig2.add_vline(x=ENG_Q80, line_dash="dash", line_color="white",
+                       annotation_text=f"q80 = {ENG_Q80}", annotation_font_color="white")
+        fig2.update_layout(
+            template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
+            title="Distribution de l'engagement (eng_score)",
+            xaxis_title="Eng. Score", yaxis_title="Nombre de posts",
+            margin={"t": 50, "b": 40},
+        )
+        figures["distribution"] = fig2.to_json()
+
+    # ── Figure 3: bandit posteriors over time (from last backtest if available)
+    backtest_series_path = DATA_DIR / "backtest_posteriors.json"
+    if backtest_series_path.exists():
+        with open(backtest_series_path) as f:
+            bt = json.load(f)
+        fig3 = go.Figure()
+        dates_bt = bt.get("dates", [])
+        for arm in ALL_ARMS:
+            vals = [p.get(arm, 0) for p in bt.get("posteriors", [])]
+            fig3.add_trace(go.Scatter(x=dates_bt, y=vals, name=arm, mode="lines"))
+        fig3.update_layout(
+            template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
+            title="Évolution des posteriors par archétype (dernier backtest)",
+            yaxis_title="θ̄", margin={"t": 50, "b": 40},
+        )
+        figures["bandit"] = fig3.to_json()
+    else:
+        # Placeholder empty figure
+        fig3 = go.Figure()
+        fig3.update_layout(
+            template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
+            title="Posteriors bandit — lancez un backtest pour alimenter ce graphe",
+        )
+        figures["bandit"] = fig3.to_json()
+
+    # ── Figure 4: CUSUM statistics over time ────────────────────────────────
+    if AUDIENCE_CSV.exists():
+        df = pd.read_csv(AUDIENCE_CSV, parse_dates=["date"])
+        df = df.sort_values("date").reset_index(drop=True)
+        smooth = df["new_followers"].rolling(14, min_periods=1).mean()
+        calib = smooth.iloc[:60]
+        mu0 = float(calib.mean())
+        sigma = max(float(calib.std()), 1e-3)
+        from growth_system.changepoint import CusumDetector as _CD2
+        det2 = _CD2(mu0=mu0, k=0.5 * sigma, h=4.5 * sigma)
+        s_plus_vals, s_minus_vals, alarm_dates = [], [], []
+        for _, row in df.iterrows():
+            det2._s_plus = max(0.0, det2._s_plus + (float(smooth[row.name]) - mu0 - det2.k))
+            det2._s_minus = max(0.0, det2._s_minus - (float(smooth[row.name]) - mu0 - det2.k))
+            s_plus_vals.append(round(det2._s_plus, 3))
+            s_minus_vals.append(round(det2._s_minus, 3))
+            if det2._s_plus >= det2.h or det2._s_minus >= det2.h:
+                alarm_dates.append(str(row["date"].date()))
+                det2._s_plus = 0.0
+                det2._s_minus = 0.0
+
+        fig4 = go.Figure()
+        fig4.add_trace(go.Scatter(x=df["date"], y=s_plus_vals,
+                                   name="S+ (hausse)", line={"color": "#E8540A"}))
+        fig4.add_trace(go.Scatter(x=df["date"], y=s_minus_vals,
+                                   name="S− (baisse)", line={"color": "#4A90D9"}))
+        fig4.add_hline(y=det2.h, line_dash="dash", line_color="white",
+                       annotation_text=f"h = {det2.h:.2f}", annotation_font_color="white")
+        fig4.update_layout(
+            template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
+            title="Statistiques CUSUM (S+, S−)", yaxis_title="Statistique",
+            margin={"t": 50, "b": 40},
+        )
+        figures["cusum"] = fig4.to_json()
+
+    return figures
 
 
 def _append_lead(post_id: str, leads: int) -> None:

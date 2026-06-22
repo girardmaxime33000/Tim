@@ -93,6 +93,28 @@ tr:hover td { background: var(--bg3); }
 /* ─── Charts (canvas) ─── */
 canvas { display: block; width: 100% !important; height: 220px !important; }
 
+/* ─── Plotly containers ─── */
+.plotly-chart { width: 100%; height: 280px; }
+
+/* ─── Posts table ─── */
+.posts-table th { cursor: pointer; user-select: none; white-space: nowrap; }
+.posts-table th:hover { color: var(--orange); }
+.posts-table th.sort-asc::after { content: ' ▲'; color: var(--orange); }
+.posts-table th.sort-desc::after { content: ' ▼'; color: var(--orange); }
+.posts-table td { vertical-align: top; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.posts-table td.score-high { color: var(--orange); font-weight: bold; }
+.posts-table td.score-mid { color: var(--amber); }
+.tag { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; margin: 1px; }
+.tag.contrarian { background: #3a1800; color: #e8540a; }
+.tag.question   { background: #1a2e00; color: #8bc34a; }
+.tag.data       { background: #00203a; color: #4fc3f7; }
+.tag.statement  { background: #252525; color: #888; }
+.tag.image      { background: #1e1e3a; color: #9575cd; }
+.tag.video      { background: #1a3a1a; color: #4caf50; }
+.tag.cta-yes    { background: #3a2800; color: #ffb300; }
+.bool-yes { color: var(--green); }
+.bool-no  { color: var(--text-dim); }
+
 /* ─── Spinner ─── */
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--orange); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-left: 6px; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -100,6 +122,7 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 /* ─── Contributions ─── */
 .contrib-bar { height: 6px; border-radius: 3px; display: inline-block; min-width: 2px; }
 </style>
+<script src="/vendor/plotly.min.js"></script>
 </head>
 <body>
 
@@ -270,13 +293,28 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
   </div>
 
   <div class="card">
-    <h2>Nouveaux abonnés / jour (lissé 14 j)</h2>
-    <canvas id="chart-followers"></canvas>
+    <h2>Dynamique d'audience — abonnés &amp; impressions</h2>
+    <div id="chart-growth" class="plotly-chart"></div>
   </div>
 
   <div class="card">
-    <h2>Impressions / jour</h2>
-    <canvas id="chart-impressions"></canvas>
+    <h2>Distribution de l'engagement</h2>
+    <div id="chart-distribution" class="plotly-chart"></div>
+  </div>
+
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <h2>Statistiques CUSUM</h2>
+        <div id="chart-cusum" class="plotly-chart"></div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h2>Posteriors bandit (dernier backtest)</h2>
+        <div id="chart-bandit" class="plotly-chart"></div>
+      </div>
+    </div>
   </div>
 
   <div class="card">
@@ -292,7 +330,78 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
     </table>
   </div>
 
-  <button class="secondary" onclick="loadMonitor()" style="margin-top:4px">Rafraîchir</button>
+  <button class="secondary" onclick="loadMonitor()" style="margin-top:4px">Rafraîchir monitoring</button>
+
+  <!-- ─── Table des posts ─────────────────────────────────────────────── -->
+  <div class="card" style="margin-top:20px">
+    <h2>Détail des posts</h2>
+
+    <!-- Filtres -->
+    <div class="row" style="margin-bottom:12px;gap:10px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:6px">
+        <label style="margin:0;white-space:nowrap">Format</label>
+        <select id="posts-filter-format" onchange="loadPostsTable(1)" style="width:140px">
+          <option value="">Tous</option>
+          <option>Text only</option>
+          <option>Image</option>
+          <option>Video</option>
+          <option>Document-Carousel</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <label style="margin:0;white-space:nowrap">Hook Type</label>
+        <select id="posts-filter-hook" onchange="loadPostsTable(1)" style="width:130px">
+          <option value="">Tous</option>
+          <option>Contrarian</option>
+          <option>Question</option>
+          <option>Data</option>
+          <option>Statement</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <label style="margin:0">Has CTA</label>
+        <select id="posts-filter-cta" onchange="loadPostsTable(1)" style="width:100px">
+          <option value="">Tous</option>
+          <option value="true">Oui</option>
+          <option value="false">Non</option>
+        </select>
+      </div>
+      <div style="margin-left:auto;color:var(--text-dim);font-size:11px;align-self:center" id="posts-count"></div>
+    </div>
+
+    <div style="overflow-x:auto">
+      <table class="posts-table" id="posts-table-el">
+        <thead>
+          <tr>
+            <th style="width:30px">#</th>
+            <th class="sort-desc" data-sort="date" onclick="sortPosts('date')" style="min-width:200px">Post Text (excerpt)</th>
+            <th data-sort="date" onclick="sortPosts('date')" style="width:90px">Date</th>
+            <th style="width:100px">Format</th>
+            <th style="width:90px">Hook Type</th>
+            <th data-sort="likes" onclick="sortPosts('likes')" style="width:55px">Likes</th>
+            <th data-sort="comments" onclick="sortPosts('comments')" style="width:70px">Comments</th>
+            <th data-sort="shares" onclick="sortPosts('shares')" style="width:55px">Shares</th>
+            <th data-sort="eng_score" onclick="sortPosts('eng_score')" style="width:70px">Eng.Score</th>
+            <th data-sort="text_len" onclick="sortPosts('text_len')" style="width:65px">Text Len</th>
+            <th style="width:45px">Emoji</th>
+            <th style="width:55px">Link</th>
+            <th style="width:45px">CTA</th>
+            <th style="width:60px">URL</th>
+          </tr>
+        </thead>
+        <tbody id="posts-tbody">
+          <tr><td colspan="14" style="color:var(--text-dim);text-align:center">Chargement…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Pagination -->
+    <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+      <button class="secondary" id="posts-prev" onclick="loadPostsTable(_postsPage - 1)" disabled>◀ Précédent</button>
+      <span id="posts-pager" style="color:var(--text-dim);font-size:11px"></span>
+      <button class="secondary" id="posts-next" onclick="loadPostsTable(_postsPage + 1)">Suivant ▶</button>
+    </div>
+  </div>
 
 </div><!-- /tab-monitor -->
 
@@ -477,7 +586,7 @@ function showTab(id) {
   document.getElementById('tab-' + id).classList.add('active');
   event.target.classList.add('active');
   if (id === 'profil') loadProfile();
-  if (id === 'monitor') loadMonitor();
+  if (id === 'monitor') { loadMonitor(); loadPostsTable(1); }
   if (id === 'bandit') doRecommend();
   if (id === 'leads') loadLeads();
 }
@@ -700,32 +809,43 @@ async function doUpdate() {
 // Onglet 4 — Monitoring
 // ─────────────────────────────────────────────────────────────────────────
 
+const PLOTLY_LAYOUT_BASE = {
+  paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
+  font: { color: '#e0e0e0', family: 'SF Mono, Fira Code, monospace', size: 11 },
+  margin: { t: 30, b: 50, l: 50, r: 20 },
+  legend: { orientation: 'h', y: -0.2 },
+  xaxis: { gridcolor: '#333', linecolor: '#3a3a3a' },
+  yaxis: { gridcolor: '#333', linecolor: '#3a3a3a' },
+};
+
 async function loadMonitor() {
   try {
-    const r = await apiFetch('/api/monitor');
+    const [r, figs] = await Promise.all([
+      apiFetch('/api/monitor'),
+      apiFetch('/api/monitor/figures'),
+    ]);
 
     // Alarm banner
     const banner = document.getElementById('monitor-alarm-banner');
     if (r.retrain_recommended) {
       banner.style.display = '';
       document.getElementById('alarm-detail').textContent =
-        r.days_since_last_alarm != null
-          ? `(il y a ${r.days_since_last_alarm} j)`
-          : '';
+        r.days_since_last_alarm != null ? `(il y a ${r.days_since_last_alarm} j)` : '';
     } else {
       banner.style.display = 'none';
     }
 
-    // Charts — show only last 180 days for readability
-    const n = r.dates.length;
-    const slice = Math.min(n, 180);
-    const dates = r.dates.slice(-slice);
-    const smooth = r.new_followers_smooth.slice(-slice);
-    const impressions = r.impressions.slice(-slice);
-    const alarmDates = r.alarms.map(a => a.date);
-
-    drawLineChart('chart-followers', [{ data: smooth, color: '#e8540a' }], dates, { alarmDates });
-    drawLineChart('chart-impressions', [{ data: impressions, color: '#4caf50' }], dates, { alarmDates });
+    // Plotly figures
+    const renderFig = (divId, figJson) => {
+      const fig = JSON.parse(figJson);
+      fig.layout = Object.assign({}, PLOTLY_LAYOUT_BASE, fig.layout,
+        { paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a' });
+      Plotly.newPlot(divId, fig.data, fig.layout, { responsive: true, displaylogo: false });
+    };
+    if (figs.growth)       renderFig('chart-growth', figs.growth);
+    if (figs.distribution) renderFig('chart-distribution', figs.distribution);
+    if (figs.cusum)        renderFig('chart-cusum', figs.cusum);
+    if (figs.bandit)       renderFig('chart-bandit', figs.bandit);
 
     // Totals
     const t = r.totals;
@@ -743,6 +863,92 @@ async function loadMonitor() {
 
   } catch(e) {
     document.getElementById('monitor-totals').textContent = 'Erreur : ' + e.message;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Posts table
+// ─────────────────────────────────────────────────────────────────────────
+
+let _postsPage = 1;
+let _postsSortBy = 'date';
+let _postsSortOrder = 'desc';
+const POSTS_PER_PAGE = 25;
+
+function sortPosts(col) {
+  if (_postsSortBy === col) {
+    _postsSortOrder = _postsSortOrder === 'desc' ? 'asc' : 'desc';
+  } else {
+    _postsSortBy = col;
+    _postsSortOrder = 'desc';
+  }
+  // Update header indicators
+  document.querySelectorAll('#posts-table-el th').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    if (th.dataset.sort === col) th.classList.add(_postsSortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
+  });
+  loadPostsTable(1);
+}
+
+async function loadPostsTable(page = 1) {
+  _postsPage = page;
+  const format   = document.getElementById('posts-filter-format').value;
+  const hookType = document.getElementById('posts-filter-hook').value;
+  const cta      = document.getElementById('posts-filter-cta').value;
+
+  let url = `/api/posts?sort_by=${_postsSortBy}&order=${_postsSortOrder}&limit=${POSTS_PER_PAGE}&offset=${(page-1)*POSTS_PER_PAGE}`;
+  if (format)   url += `&format=${encodeURIComponent(format)}`;
+  if (hookType) url += `&hook_type=${encodeURIComponent(hookType)}`;
+  if (cta !== '') url += `&has_cta_filter=${cta}`;
+
+  try {
+    const r = await apiFetch(url);
+    const tbody = document.getElementById('posts-tbody');
+    const ENG_Q80 = 98.2;
+
+    if (!r.posts.length) {
+      tbody.innerHTML = '<tr><td colspan="14" style="color:var(--text-dim);text-align:center">Aucun post</td></tr>';
+    } else {
+      tbody.innerHTML = r.posts.map(p => {
+        const scoreCls = p.eng_score >= ENG_Q80 ? 'score-high' : p.eng_score >= 40 ? 'score-mid' : '';
+        const hookTag  = `<span class="tag ${p.hook_type.toLowerCase()}">${p.hook_type}</span>`;
+        const fmtTag   = p.format === 'Image' ? `<span class="tag image">Image</span>`
+                       : p.format === 'Video' ? `<span class="tag video">Video</span>`
+                       : `<span style="color:var(--text-dim)">${p.format}</span>`;
+        const ctaTag   = p.has_cta ? `<span class="tag cta-yes">CTA</span>` : `<span class="bool-no">—</span>`;
+        const linkBadge = p.has_link ? `<span class="bool-yes">✓</span>` : `<span class="bool-no">—</span>`;
+        const url = p.permalink.startsWith('http')
+          ? `<a href="${p.permalink}" target="_blank" style="color:var(--orange);font-size:10px">↗</a>`
+          : `<span style="color:var(--text-dim);font-size:10px">—</span>`;
+        return `<tr>
+          <td style="color:var(--text-dim)">${p.rank}</td>
+          <td title="${p.excerpt.replace(/"/g,'&quot;')}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${p.excerpt}</td>
+          <td style="color:var(--text-dim)">${p.date || '—'}</td>
+          <td>${fmtTag}</td>
+          <td>${hookTag}</td>
+          <td>${p.likes}</td>
+          <td>${p.comments}</td>
+          <td>${p.shares}</td>
+          <td class="${scoreCls}">${p.eng_score.toFixed(0)}</td>
+          <td style="color:var(--text-dim)">${p.text_len}</td>
+          <td style="color:var(--text-dim)">${p.emoji || '—'}</td>
+          <td>${linkBadge}</td>
+          <td>${ctaTag}</td>
+          <td>${url}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Pagination controls
+    const totalPages = Math.ceil(r.total / POSTS_PER_PAGE);
+    document.getElementById('posts-count').textContent = `${r.total} posts`;
+    document.getElementById('posts-pager').textContent = `Page ${page} / ${totalPages}`;
+    document.getElementById('posts-prev').disabled = page <= 1;
+    document.getElementById('posts-next').disabled = page >= totalPages;
+
+  } catch(e) {
+    document.getElementById('posts-tbody').innerHTML =
+      `<tr><td colspan="14" class="msg err">${e.message}</td></tr>`;
   }
 }
 

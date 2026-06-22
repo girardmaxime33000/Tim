@@ -11,6 +11,13 @@ _HOOK_CONTRARIAN_RE = re.compile(
 _EMOJI_RE = re.compile(r'[\U0001F300-\U0001FAFF☀-➿]')
 _TAGS_RE = re.compile(r'[A-ZÀ-Ý][a-zà-ÿ]+\s+[A-ZÀ-Ý]')
 
+# CTA patterns — defined once, shared by table display and future scoring features
+_CTA_RE = re.compile(
+    r'(👉|Découvrez|Dites-moi|Partagez|[Cc]ommentez|DM|contactez|abonnez)',
+    re.IGNORECASE,
+)
+_LINK_RE = re.compile(r'https?://')
+
 
 def extract_features(text: str) -> dict[str, float]:
     """Extract the 8 features used by the tail scorer."""
@@ -38,3 +45,32 @@ def extract_features(text: str) -> dict[str, float]:
         "hook_question": hook_question,
         "hook_data": hook_data,
     }
+
+
+def hook_type_label(text: str) -> str:
+    """Return the archetype label for the hook of a post.
+
+    Priority: Contrarian > Question > Data > Statement.
+    Mirrors the priority order used by archetypes.py (archetype_of).
+    """
+    if not isinstance(text, str):
+        return "Statement"
+    feats = extract_features(text)
+    if feats["hook_contrarian"]:
+        return "Contrarian"
+    if feats["hook_question"]:
+        return "Question"
+    if feats["hook_data"]:
+        return "Data"
+    return "Statement"
+
+
+def has_link(text: str) -> bool:
+    """Return True if the text contains a URL (http/https)."""
+    return bool(_LINK_RE.search(text)) if isinstance(text, str) else False
+
+
+def has_cta(text: str) -> bool:
+    """Return True if the text contains a call-to-action pattern."""
+    return bool(_CTA_RE.search(text)) if isinstance(text, str) else False
+
