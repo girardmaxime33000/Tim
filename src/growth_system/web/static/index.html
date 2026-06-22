@@ -3,92 +3,89 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Growth System — OS de croissance</title>
+<title>LinkedIn Growth Simulator</title>
 <style>
 :root {
-  --bg: #1a1a1a;
-  --bg2: #252525;
-  --bg3: #2e2e2e;
-  --border: #3a3a3a;
-  --orange: #e8540a;
-  --orange-dim: #b84008;
-  --text: #e0e0e0;
-  --text-dim: #888;
-  --green: #4caf50;
-  --amber: #ff9800;
-  --red: #f44336;
-  --font: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  --bg: #FAFAFA;
+  --bg2: #FFFFFF;
+  --bg3: #F5F5F5;
+  --border: #E0E0E0;
+  --orange: #E8540A;
+  --orange-dim: #C4430A;
+  --text: #202124;
+  --text-dim: #5F6368;
+  --green: #188038;
+  --amber: #E37400;
+  --red: #C5221F;
+  --font: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
 
 /* ─── Layout ─── */
-header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 16px; }
-header h1 { color: var(--orange); font-size: 16px; letter-spacing: .04em; }
+header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+header h1 { color: var(--text); font-size: 15px; font-weight: 600; letter-spacing: .01em; }
 header span { color: var(--text-dim); font-size: 11px; }
-#health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); margin-left: auto; }
-#health-dot.ok { background: var(--green); }
-#health-dot.degraded { background: var(--amber); }
 
 nav { background: var(--bg2); border-bottom: 1px solid var(--border); display: flex; }
-nav button { background: none; border: none; color: var(--text-dim); padding: 10px 18px; cursor: pointer; font: inherit; font-size: 12px; border-bottom: 2px solid transparent; transition: .15s; }
+nav button { background: none; border: none; color: var(--text-dim); padding: 10px 18px; cursor: pointer; font: inherit; font-size: 13px; border-bottom: 2px solid transparent; transition: .15s; }
 nav button:hover { color: var(--text); }
-nav button.active { color: var(--orange); border-bottom-color: var(--orange); }
+nav button.active { color: var(--orange); border-bottom-color: var(--orange); font-weight: 500; }
 
 main { padding: 20px; max-width: 1100px; }
 .tab { display: none; }
 .tab.active { display: block; }
 
 /* ─── Components ─── */
-.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
-.card h2 { font-size: 12px; color: var(--orange); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.card h2 { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; font-weight: 600; }
 .card h3 { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
 
 label { display: block; color: var(--text-dim); margin-bottom: 4px; font-size: 11px; }
 input[type=text], input[type=number], textarea, select {
-  width: 100%; background: var(--bg3); border: 1px solid var(--border); color: var(--text);
-  padding: 7px 10px; border-radius: 4px; font: inherit; font-size: 12px;
+  width: 100%; background: var(--bg2); border: 1px solid var(--border); color: var(--text);
+  padding: 7px 10px; border-radius: 4px; font: inherit; font-size: 13px;
 }
 textarea { resize: vertical; min-height: 140px; }
 input:focus, textarea:focus, select:focus { outline: none; border-color: var(--orange); }
 
-button.primary { background: var(--orange); color: #fff; border: none; padding: 8px 18px; border-radius: 4px; cursor: pointer; font: inherit; font-size: 12px; font-weight: bold; transition: .15s; }
+button.primary { background: var(--orange); color: #fff; border: none; padding: 8px 18px; border-radius: 4px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 500; transition: .15s; }
 button.primary:hover { background: var(--orange-dim); }
 button.primary:disabled { background: var(--bg3); color: var(--text-dim); cursor: not-allowed; }
-button.secondary { background: var(--bg3); color: var(--text); border: 1px solid var(--border); padding: 7px 14px; border-radius: 4px; cursor: pointer; font: inherit; font-size: 12px; }
+button.secondary { background: var(--bg2); color: var(--text); border: 1px solid var(--border); padding: 7px 14px; border-radius: 4px; cursor: pointer; font: inherit; font-size: 13px; }
 button.secondary:hover { border-color: var(--orange); color: var(--orange); }
 
 .row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
 .col { flex: 1; min-width: 200px; }
 
-.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
-.badge.green { background: #1b3a1e; color: var(--green); }
-.badge.amber { background: #3a2a00; color: var(--amber); }
-.badge.red { background: #3a1010; color: var(--red); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.badge.green { background: #E6F4EA; color: var(--green); }
+.badge.amber { background: #FEF3E2; color: var(--amber); }
+.badge.red { background: #FCE8E6; color: var(--red); }
 
-.msg { padding: 8px 12px; border-radius: 4px; font-size: 11px; margin-top: 8px; }
-.msg.ok { background: #1b3a1e; color: var(--green); border-left: 3px solid var(--green); }
-.msg.warn { background: #3a2a00; color: var(--amber); border-left: 3px solid var(--amber); }
-.msg.err { background: #3a1010; color: var(--red); border-left: 3px solid var(--red); }
+.msg { padding: 8px 12px; border-radius: 4px; font-size: 12px; margin-top: 8px; }
+.msg.ok { background: #E6F4EA; color: var(--green); border-left: 3px solid var(--green); }
+.msg.warn { background: #FEF3E2; color: var(--amber); border-left: 3px solid var(--amber); }
+.msg.err { background: #FCE8E6; color: var(--red); border-left: 3px solid var(--red); }
 
-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-th { text-align: left; color: var(--text-dim); border-bottom: 1px solid var(--border); padding: 6px 8px; font-weight: normal; }
-td { padding: 6px 8px; border-bottom: 1px solid #2a2a2a; }
-tr:hover td { background: var(--bg3); }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; color: var(--text-dim); border-bottom: 1px solid var(--border); padding: 6px 8px; font-weight: 500; font-size: 11px; }
+td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+tr:hover td { background: #F8F9FA; }
 
 /* ─── Gauge ─── */
 .gauge-wrap { margin: 8px 0; }
-.gauge-track { height: 10px; background: var(--bg3); border-radius: 5px; overflow: hidden; }
-.gauge-fill { height: 100%; border-radius: 5px; transition: width .4s; }
-.gauge-label { font-size: 22px; font-weight: bold; margin: 6px 0 2px; }
+.gauge-track { height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
+.gauge-fill { height: 100%; border-radius: 3px; transition: width .4s; }
 
 /* ─── Drop zone ─── */
 #drop-zone {
-  border: 2px dashed var(--border); border-radius: 6px; padding: 32px;
+  border: 2px dashed var(--border); border-radius: 8px; padding: 32px;
   text-align: center; color: var(--text-dim); cursor: pointer; transition: .2s;
+  background: var(--bg3);
 }
-#drop-zone.over { border-color: var(--orange); color: var(--orange); }
-#drop-zone:hover { border-color: var(--text-dim); }
+#drop-zone.over { border-color: var(--orange); color: var(--orange); background: #FEF3EE; }
+#drop-zone:hover { border-color: #9E9E9E; }
 
 /* ─── Charts (canvas) ─── */
 canvas { display: block; width: 100% !important; height: 220px !important; }
@@ -104,16 +101,19 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 .posts-table td { vertical-align: top; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .posts-table td.score-high { color: var(--orange); font-weight: bold; }
 .posts-table td.score-mid { color: var(--amber); }
-.tag { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; margin: 1px; }
-.tag.contrarian { background: #3a1800; color: #e8540a; }
-.tag.question   { background: #1a2e00; color: #8bc34a; }
-.tag.data       { background: #00203a; color: #4fc3f7; }
-.tag.statement  { background: #252525; color: #888; }
-.tag.image      { background: #1e1e3a; color: #9575cd; }
-.tag.video      { background: #1a3a1a; color: #4caf50; }
-.tag.cta-yes    { background: #3a2800; color: #ffb300; }
+.tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; margin: 1px; font-weight: 500; }
+.tag.contrarian { background: #FEE8DC; color: #C44A00; }
+.tag.question   { background: #E8F5E9; color: #2E7D32; }
+.tag.data       { background: #E3F2FD; color: #1565C0; }
+.tag.statement  { background: #F5F5F5; color: #5F6368; }
+.tag.image      { background: #EDE7F6; color: #6A1B9A; }
+.tag.video      { background: #E0F7FA; color: #00695C; }
+.tag.cta-yes    { background: #FFF8E1; color: #E65100; }
 .bool-yes { color: var(--green); }
 .bool-no  { color: var(--text-dim); }
+
+/* ─── Gauge ─── */
+.gauge-label { font-size: 32px; font-weight: 600; margin: 4px 0 2px; }
 
 /* ─── Spinner ─── */
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--orange); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-left: 6px; }
@@ -127,9 +127,7 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 <body>
 
 <header>
-  <h1>&#9652; Growth System</h1>
-  <span>OS de croissance LinkedIn</span>
-  <div id="health-dot" title="API status"></div>
+  <h1>LinkedIn Growth Simulator</h1>
 </header>
 
 <nav>
@@ -549,7 +547,7 @@ function drawLineChart(canvasId, datasets, labels, opts = {}) {
   const pw = W - PAD.left - PAD.right;
   const ph = H - PAD.top - PAD.bottom;
 
-  ctx.fillStyle = '#252525';
+  ctx.fillStyle = '#FFFFFF';
   ctx.fillRect(0, 0, W, H);
 
   // Compute global min/max
@@ -563,13 +561,13 @@ function drawLineChart(canvasId, datasets, labels, opts = {}) {
   const yScale = v => PAD.top + ph - ((v - minY) / (maxY - minY)) * ph;
 
   // Grid lines
-  ctx.strokeStyle = '#333';
+  ctx.strokeStyle = '#E0E0E0';
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = PAD.top + (i / 4) * ph;
     ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + pw, y); ctx.stroke();
     const val = maxY - (i / 4) * (maxY - minY);
-    ctx.fillStyle = '#666'; ctx.font = '10px monospace';
+    ctx.fillStyle = '#5F6368'; ctx.font = '10px sans-serif';
     ctx.textAlign = 'right'; ctx.fillText(val.toFixed(1), PAD.left - 4, y + 3);
   }
 
@@ -602,7 +600,7 @@ function drawLineChart(canvasId, datasets, labels, opts = {}) {
   });
 
   // X axis labels (sparse)
-  ctx.fillStyle = '#666'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+  ctx.fillStyle = '#5F6368'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
   const step = Math.max(1, Math.floor(n / 6));
   for (let i = 0; i < n; i += step) {
     ctx.fillText(labels[i].slice(0, 7), xScale(i), H - PAD.bottom + 14);
@@ -614,7 +612,7 @@ function drawLineChart(canvasId, datasets, labels, opts = {}) {
     opts.legend.forEach((l, i) => {
       ctx.fillStyle = datasets[i].color || '#e8540a';
       ctx.fillRect(lx, 4, 18, 6);
-      ctx.fillStyle = '#aaa'; ctx.textAlign = 'left';
+      ctx.fillStyle = '#5F6368'; ctx.textAlign = 'left';
       ctx.fillText(l, lx + 22, 11);
       lx += ctx.measureText(l).width + 36;
     });
@@ -649,21 +647,6 @@ function showTab(id) {
   if (id === 'monitor') { loadMonitor(); loadPostsTable(1); }
   if (id === 'bandit') doRecommend();
   if (id === 'leads') loadLeads();
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Health check
-// ─────────────────────────────────────────────────────────────────────────
-
-async function checkHealth() {
-  try {
-    const h = await apiFetch('/api/health');
-    const dot = document.getElementById('health-dot');
-    dot.className = h.status === 'ok' ? 'ok' : 'degraded';
-    dot.title = 'API: ' + h.status + ' | posts: ' + (h.posts_count ?? '?');
-  } catch(e) {
-    document.getElementById('health-dot').className = '';
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -706,7 +689,7 @@ async function ingestFile(file) {
       Doublons supprimés : <b>${r.duplicates_removed}</b>
       ${r.snapshot ? '<br>Snapshot : ' + r.snapshot : ''}
     </div>`;
-    if (!dryRun) { loadProfile(); checkHealth(); }
+    if (!dryRun) { loadProfile(); }
   } catch(e) {
     statusEl.innerHTML = `<div class="msg err">✗ ${e.message}</div>`;
   }
@@ -736,7 +719,7 @@ async function loadProfile() {
         </div>
       </div>
       <div style="margin-top:12px">
-        <div class="card" style="background:var(--bg3)">
+        <div class="card">
           <h3>Tail rate par archétype</h3>
           <table><thead><tr><th>Archétype</th><th>Tail rate</th></tr></thead><tbody>
             ${Object.entries(p.top_archetypes).sort((a,b)=>b[1]-a[1]).map(([k,v]) =>
@@ -870,12 +853,12 @@ async function doUpdate() {
 // ─────────────────────────────────────────────────────────────────────────
 
 const PLOTLY_LAYOUT_BASE = {
-  paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
-  font: { color: '#e0e0e0', family: 'SF Mono, Fira Code, monospace', size: 11 },
+  paper_bgcolor: '#FFFFFF', plot_bgcolor: '#FAFAFA',
+  font: { color: '#202124', family: '-apple-system, "Segoe UI", Roboto, Arial, sans-serif', size: 11 },
   margin: { t: 30, b: 50, l: 50, r: 20 },
   legend: { orientation: 'h', y: -0.2 },
-  xaxis: { gridcolor: '#333', linecolor: '#3a3a3a' },
-  yaxis: { gridcolor: '#333', linecolor: '#3a3a3a' },
+  xaxis: { gridcolor: '#F1F3F4', linecolor: '#E0E0E0' },
+  yaxis: { gridcolor: '#F1F3F4', linecolor: '#E0E0E0' },
 };
 
 async function loadMonitor() {
@@ -899,7 +882,7 @@ async function loadMonitor() {
     const renderFig = (divId, figJson) => {
       const fig = JSON.parse(figJson);
       fig.layout = Object.assign({}, PLOTLY_LAYOUT_BASE, fig.layout,
-        { paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a' });
+        { paper_bgcolor: '#FFFFFF', plot_bgcolor: '#FAFAFA' });
       Plotly.newPlot(divId, fig.data, fig.layout, { responsive: true, displaylogo: false });
     };
     if (figs.growth)       renderFig('chart-growth', figs.growth);
@@ -1142,19 +1125,19 @@ async function doBacktest() {
     const alarmDates = r.changepoints_detected;
 
     drawLineChart('chart-backtest-reward', [
-      { data: r.cum_reward_P0, color: '#888', dash: [4, 3] },
-      { data: r.cum_reward_P1, color: '#4fc3f7' },
-      { data: r.cum_reward_P2, color: '#ef5350' },
+      { data: r.cum_reward_P0, color: '#9E9E9E', dash: [4, 3] },
+      { data: r.cum_reward_P1, color: '#1565C0' },
+      { data: r.cum_reward_P2, color: '#E8540A' },
     ], r.dates, {
       alarmDates,
       legend: ['P0 Statique', 'P1 Stationnaire', 'P2 Escompte'],
     });
 
     drawLineChart('chart-backtest-regret', [
-      { data: r.regret, color: '#ab47bc' },
+      { data: r.regret, color: '#6A1B9A' },
     ], r.dates, { alarmDates });
 
-    const COLORS = { contrarian: '#e8540a', data: '#4fc3f7', question: '#4caf50', statement: '#888' };
+    const COLORS = { contrarian: '#E8540A', data: '#1565C0', question: '#188038', statement: '#9E9E9E' };
     const arms = Object.keys(r.posteriors_over_time[0] || {});
     drawLineChart('chart-backtest-post', arms.map(a => ({
       data: r.posteriors_over_time.map(p => p[a]),
@@ -1177,7 +1160,6 @@ async function doBacktest() {
 // Init
 // ─────────────────────────────────────────────────────────────────────────
 
-checkHealth();
 loadProfile();
 </script>
 </body>
