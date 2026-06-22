@@ -886,13 +886,13 @@ async function loadMonitor() {
     ]);
 
     // Alarm banner
-    const banner = document.getElementById('monitor-alarm-banner');
+    const alarmBanner = document.getElementById('monitor-alarm-banner');
     if (r.retrain_recommended) {
-      banner.style.display = '';
+      alarmBanner.style.display = '';
       document.getElementById('alarm-detail').textContent =
         r.days_since_last_alarm != null ? `(il y a ${r.days_since_last_alarm} j)` : '';
     } else {
-      banner.style.display = 'none';
+      alarmBanner.style.display = 'none';
     }
 
     // Plotly figures
