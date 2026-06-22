@@ -42,11 +42,67 @@ Le système ne touche pas à la rédaction. Il filtre, oriente et mesure.
 
 ## Installation
 
+> **Règle d'or :** toutes les commandes du projet (`growth`, `pytest`,
+> `python scripts/…`) doivent s'exécuter depuis le **même environnement
+> virtuel**. Ne pas installer le package dans le Python global ni via
+> Homebrew — cela crée des environnements parallèles incompatibles.
+
+### Première installation (clone propre)
+
 ```bash
+# 1. Créer et activer le venv à la racine du repo
+python3 -m venv .venv
+source .venv/bin/activate        # macOS / Linux
+# .venv\Scripts\activate         # Windows (PowerShell)
+
+# 2. Installer le package en mode éditable avec toutes ses dépendances
 pip install -e .
+
+# 3. Vérifier
+growth --help                    # CLI disponible
+python -m pytest tests/ -q       # tous les tests doivent passer
+python scripts/deduplicate_leads.py  # script opérationnel
 ```
 
-Dépendances : `numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`, `plotly`, `fastapi`, `pydantic>=2`, `typer`.
+Le venv est ignoré par git (`.gitignore` contient `.venv/`).
+
+### Sessions suivantes
+
+```bash
+# Toujours activer le venv avant de travailler
+source .venv/bin/activate
+
+growth serve                     # interface web
+```
+
+### Dépendances
+
+Toutes les dépendances sont déclarées dans `pyproject.toml` (section
+`[project] dependencies`) — `numpy`, `pandas`, `scipy`, `scikit-learn`,
+`matplotlib`, `plotly`, `fastapi`, `pydantic>=2`, `typer`, `openpyxl`,
+`uvicorn`, `python-multipart`. Pas de `requirements.txt` séparé à
+maintenir.
+
+### Résolution du conflit Homebrew / Python système (macOS)
+
+Si `which growth` → `/opt/homebrew/bin/growth` mais
+`python3 scripts/…` échoue avec `ModuleNotFoundError` :
+
+```bash
+# 1. Désinstaller l'éventuelle install globale Homebrew/pip
+pip3 uninstall growth-system -y 2>/dev/null || true
+brew uninstall growth-system 2>/dev/null || true
+
+# 2. Repartir du venv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+# 3. Confirmer que tout pointe vers le même Python
+which growth          # doit afficher …/.venv/bin/growth
+which python          # doit afficher …/.venv/bin/python
+python -c "import pandas; print('OK')"
+```
 
 ---
 
