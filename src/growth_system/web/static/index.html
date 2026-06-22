@@ -287,6 +287,11 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <div id="tab-monitor" class="tab">
 
+  <!-- Bandeau fraîcheur leads (sticky) -->
+  <div id="leads-coverage-banner" style="display:none;position:sticky;top:0;z-index:100;margin-bottom:12px;padding:10px 16px;border-radius:6px;font-size:12px;border:1px solid var(--border)">
+    <span id="leads-coverage-text"></span>
+  </div>
+
   <div class="card" id="monitor-alarm-banner" style="display:none;border-color:var(--amber)">
     <span style="color:var(--amber)">&#9888; Rupture de régime détectée — ré-entraînement recommandé.</span>
     <span id="alarm-detail" style="color:var(--text-dim);margin-left:8px"></span>
@@ -315,6 +320,28 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
         <div id="chart-bandit" class="plotly-chart"></div>
       </div>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Posteriors bandit EN DIRECT</h2>
+    <div id="chart-bandit-live" class="plotly-chart"></div>
+  </div>
+
+  <div class="card">
+    <h2>Leads par archétype</h2>
+    <table id="leads-by-archetype-table">
+      <thead>
+        <tr>
+          <th>Archétype</th>
+          <th>Taux de queue</th>
+          <th>Leads cumulés</th>
+          <th>Leads / post</th>
+        </tr>
+      </thead>
+      <tbody id="leads-by-archetype-body">
+        <tr><td colspan="4" style="color:var(--text-dim)">Chargement…</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <div class="card">
@@ -846,6 +873,34 @@ async function loadMonitor() {
     if (figs.distribution) renderFig('chart-distribution', figs.distribution);
     if (figs.cusum)        renderFig('chart-cusum', figs.cusum);
     if (figs.bandit)       renderFig('chart-bandit', figs.bandit);
+    if (figs.bandit_live)  renderFig('chart-bandit-live', figs.bandit_live);
+
+    // Leads coverage banner
+    const banner = document.getElementById('leads-coverage-banner');
+    const cov = r.leads_coverage;
+    if (cov) {
+      const pct = (cov.ratio * 100).toFixed(0);
+      const txt = `${cov.n_with_leads}/${cov.n_total} posts avec leads saisis (${pct}%)`;
+      document.getElementById('leads-coverage-text').textContent =
+        cov.ratio < 0.5
+          ? `⚠ ${txt} — le système optimise le reach, pas la conversion.`
+          : `✓ ${txt}`;
+      banner.style.display = '';
+      banner.style.background = cov.ratio < 0.5 ? 'rgba(255,152,0,.12)' : 'rgba(76,175,80,.10)';
+      banner.style.borderColor = cov.ratio < 0.5 ? 'var(--amber)' : 'var(--green)';
+      document.getElementById('leads-coverage-text').style.color = cov.ratio < 0.5 ? 'var(--amber)' : 'var(--green)';
+    }
+
+    // Leads by archetype table
+    const lba = r.leads_by_archetype || [];
+    document.getElementById('leads-by-archetype-body').innerHTML = lba.length
+      ? lba.map(item => `<tr>
+          <td><span class="tag tag-${item.archetype}">${item.archetype}</span></td>
+          <td>${(item.tail_rate * 100).toFixed(1)}%</td>
+          <td>${item.leads_total}</td>
+          <td>${item.leads_per_post.toFixed(2)}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="4" style="color:var(--text-dim)">Aucune donnée</td></tr>';
 
     // Totals
     const t = r.totals;

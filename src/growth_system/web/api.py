@@ -436,6 +436,19 @@ class AlarmItem(BaseModel):
     statistic: float
 
 
+class LeadsByArchetypeItem(BaseModel):
+    archetype: str
+    tail_rate: float
+    leads_total: int
+    leads_per_post: float
+
+
+class LeadsCoverage(BaseModel):
+    n_with_leads: int
+    n_total: int
+    ratio: float
+
+
 class MonitorResponse(BaseModel):
     dates: list[str]
     new_followers_smooth: list[float]
@@ -444,6 +457,8 @@ class MonitorResponse(BaseModel):
     retrain_recommended: bool
     days_since_last_alarm: int | None
     totals: dict[str, float]
+    leads_coverage: LeadsCoverage
+    leads_by_archetype: list[LeadsByArchetypeItem]
 
 
 @app.get("/api/monitor", response_model=MonitorResponse)
@@ -481,6 +496,53 @@ def monitor() -> MonitorResponse:
         days_since = (datetime.date.today() - last).days
         retrain = days_since <= 90
 
+    # ── Leads coverage & leads by archetype ─────────────────────────────────
+    leads_coverage = LeadsCoverage(n_with_leads=0, n_total=0, ratio=0.0)
+    leads_by_archetype: list[LeadsByArchetypeItem] = []
+
+    if POSTS_CSV.exists():
+        pf = pd.read_csv(POSTS_CSV)
+        pf["text"] = pf["text"].fillna("").astype(str)
+        pf["arm"] = pf["text"].apply(archetype_of)
+        n_total = len(pf)
+
+        leads_map: dict[str, int] = {}  # post_id (= permalink) -> qualified_contacts
+        if LEADS_CSV.exists() and LEADS_CSV.stat().st_size > 0:
+            try:
+                lf = pd.read_csv(LEADS_CSV)
+                for _, lr in lf.iterrows():
+                    leads_map[str(lr["post_id"])] = int(lr.get("qualified_contacts", 0))
+            except Exception:
+                pass
+
+        permalinks = pf["permalink"].astype(str)
+        n_with_leads = int(permalinks.apply(lambda p: p in leads_map).sum())
+        ratio = n_with_leads / n_total if n_total > 0 else 0.0
+        leads_coverage = LeadsCoverage(
+            n_with_leads=n_with_leads,
+            n_total=n_total,
+            ratio=round(ratio, 3),
+        )
+
+        for arm in ALL_ARMS:
+            arm_df = pf[pf["arm"] == arm]
+            n_arm = len(arm_df)
+            if n_arm == 0:
+                leads_by_archetype.append(LeadsByArchetypeItem(
+                    archetype=arm, tail_rate=0.0, leads_total=0, leads_per_post=0.0,
+                ))
+                continue
+            tail_rate = float((arm_df["eng_score"] >= ENG_Q80).mean())
+            arm_leads = int(arm_df["permalink"].astype(str).apply(
+                lambda p: leads_map.get(p, 0)
+            ).sum())
+            leads_by_archetype.append(LeadsByArchetypeItem(
+                archetype=arm,
+                tail_rate=round(tail_rate, 3),
+                leads_total=arm_leads,
+                leads_per_post=round(arm_leads / n_arm, 3),
+            ))
+
     return MonitorResponse(
         dates=[str(d.date()) for d in df["date"]],
         new_followers_smooth=[round(float(v), 2) for v in smooth],
@@ -493,6 +555,8 @@ def monitor() -> MonitorResponse:
             "new_followers": round(float(df["new_followers"].sum()), 0),
             "avg_daily_impressions": round(float(df["impressions"].mean()), 1),
         },
+        leads_coverage=leads_coverage,
+        leads_by_archetype=leads_by_archetype,
     )
 
 
@@ -910,6 +974,46 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
             margin={"t": 50, "b": 40},
         )
         figures["cusum"] = fig4.to_json()
+
+    # ── Figure 5: bandit posteriors EN DIRECT (état actuel de growth_state.json)
+    from scipy.stats import beta as _beta_dist
+    import numpy as _np
+
+    bandit_live = _get_bandit()
+    live_post = bandit_live.posterior()
+    # Best arm by expected theta (deterministic — argmax, not sampled)
+    best_live = max(ALL_ARMS, key=lambda a: live_post[a][0] / (live_post[a][0] + live_post[a][1]))
+
+    ts = "jamais"
+    if STATE_JSON.exists():
+        import datetime as _dt
+        ts = _dt.datetime.fromtimestamp(STATE_JSON.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+
+    _x = [i / 199 for i in range(200)]
+    _COLORS = {"contrarian": "#E8540A", "data": "#4A90D9",
+               "question": "#4CAF50", "statement": "#FF9800"}
+    fig_live = go.Figure()
+    for arm in ALL_ARMS:
+        alpha_v, beta_v = live_post[arm]
+        try:
+            x_arr = _np.linspace(0, 1, 200)
+            y_arr = _beta_dist.pdf(x_arr, alpha_v, beta_v).tolist()
+        except Exception:
+            y_arr = [0.0] * 200
+        fig_live.add_trace(go.Scatter(
+            x=_x, y=y_arr,
+            name=arm + (" ← recommandé" if arm == best_live else ""),
+            line={"color": _COLORS.get(arm, "#888"),
+                  "width": 3 if arm == best_live else 1.5},
+        ))
+    fig_live.update_layout(
+        template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
+        title=f"Posteriors bandit EN DIRECT — Dernière MàJ : {ts}",
+        xaxis_title="θ (taux de succès estimé)",
+        yaxis_title="Densité Beta",
+        margin={"t": 60, "b": 40},
+    )
+    figures["bandit_live"] = fig_live.to_json()
 
     return figures
 
