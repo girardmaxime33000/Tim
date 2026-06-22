@@ -1198,6 +1198,296 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
     return figures
 
 
+# ---------------------------------------------------------------------------
+# Endpoints — Attribution leads LinkedIn → posts
+# ---------------------------------------------------------------------------
+
+
+class ProposedLeadRow(BaseModel):
+    post_id: str
+    qualified_contacts: float
+    raw_count: int
+    weighted_count: float
+
+
+class UnattributedItem(BaseModel):
+    nom: str
+    raison: str
+
+
+class AttributeDetailItem(BaseModel):
+    nom: str
+    titre: str
+    date_brute: str
+    date_parsee: str | None
+    motivation: str
+    type_lead: str
+    poids: float
+    post_id_attribue: str | None
+    date_post_attribue: str | None
+    eng_score_post: float | None
+    fiabilite: str
+
+
+class AttributeResponse(BaseModel):
+    n_leads_total: int
+    n_leads_parsed_date: int
+    n_leads_attributed: int
+    n_leads_unattributed: int
+    unattributed: list[UnattributedItem]
+    proposed_leads_csv: list[ProposedLeadRow]
+    detail: list[AttributeDetailItem]
+    estimation: bool
+
+
+class ApplyLeadsRequest(BaseModel):
+    proposed_leads_csv: list[ProposedLeadRow]
+    merge_strategy: str = "add"  # "add" | "replace"
+
+
+class ApplyLeadsResponse(BaseModel):
+    applied: int
+    snapshot: str
+
+
+@app.post("/api/leads/attribute", response_model=AttributeResponse)
+async def attribute_leads(
+    file: UploadFile = File(...),
+    window_days: int = Form(default=7),
+    reference_date: str | None = Form(default=None),
+    type_weights: str | None = Form(default=None),
+) -> AttributeResponse:
+    """Attribue des leads (export CSV connexions LinkedIn) aux posts, par inférence temporelle.
+
+    NE MODIFIE JAMAIS leads.csv sur disque.
+    """
+    import io as _io
+    from datetime import date as _date
+    from growth_system.leads_attribution import (
+        parse_lead_date,
+        attribute_lead_to_post,
+        aggregate_attribution,
+    )
+    from growth_system.config import DEFAULT_TYPE_WEIGHTS, DEFAULT_ATTRIBUTION_WEIGHT_FALLBACK
+
+    # --- Reference date ---
+    if reference_date:
+        ref_date = _date.fromisoformat(reference_date)
+    else:
+        ref_date = _date.today()
+
+    # --- Type weights ---
+    tw: dict[str, float] = dict(DEFAULT_TYPE_WEIGHTS)
+    if type_weights:
+        try:
+            tw.update(json.loads(type_weights))
+        except Exception:
+            pass
+
+    # --- Read uploaded CSV ---
+    content = await file.read()
+    try:
+        leads_df = pd.read_csv(_io.BytesIO(content))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Impossible de lire le CSV : {exc}")
+
+    # --- Detect columns (flexible) ---
+    col_map: dict[str, str] = {}
+    for col in leads_df.columns:
+        cl = col.lower().strip()
+        if cl in ("nom_prenom", "nom", "name", "prénom et nom", "prenom"):
+            col_map.setdefault("nom_prenom", col)
+        elif cl in ("titre", "title", "poste", "fonction"):
+            col_map.setdefault("titre", col)
+        elif cl in ("date_connexion", "date", "connected on", "date de connexion"):
+            col_map.setdefault("date_connexion", col)
+        elif cl in ("motivation", "note", "notes"):
+            col_map.setdefault("motivation", col)
+        elif cl in ("type_lead", "type", "catégorie", "categorie"):
+            col_map.setdefault("type_lead", col)
+
+    def _get(row: "pd.Series", key: str, default: str = "") -> str:
+        col = col_map.get(key)
+        if col and col in row.index:
+            v = row[col]
+            return str(v) if pd.notna(v) else default
+        return default
+
+    # --- Load posts ---
+    posts_for_attr: pd.DataFrame = pd.DataFrame(
+        columns=["post_id", "post_date", "eng_score"]
+    )
+    if POSTS_CSV.exists():
+        try:
+            pf = pd.read_csv(POSTS_CSV)
+            import datetime as _dt
+            ingest_ref = _date(2026, 6, 22)  # fallback; use _INGEST_REF_DATE
+            try:
+                from growth_system.web.api import _INGEST_REF_DATE as _iref
+                ingest_ref = _iref
+            except Exception:
+                pass
+            pf["post_date"] = pf["days_ago"].apply(
+                lambda d: ingest_ref - _dt.timedelta(days=int(d)) if pd.notna(d) else None
+            )
+            pf = pf.dropna(subset=["post_date"])
+            posts_for_attr = pf[["permalink", "post_date", "eng_score"]].copy()
+            posts_for_attr = posts_for_attr.rename(columns={"permalink": "post_id"})
+        except Exception:
+            pass
+
+    # --- Process each lead ---
+    detail_rows: list[AttributeDetailItem] = []
+    unattributed: list[UnattributedItem] = []
+    attribution_records: list[dict] = []
+
+    n_parsed = 0
+    n_attributed = 0
+
+    for _, row in leads_df.iterrows():
+        nom = _get(row, "nom_prenom", "Inconnu")
+        titre = _get(row, "titre")
+        date_brute = _get(row, "date_connexion")
+        motivation = _get(row, "motivation")
+        type_lead = _get(row, "type_lead", "À vérifier")
+
+        poids = tw.get(type_lead, DEFAULT_ATTRIBUTION_WEIGHT_FALLBACK)
+
+        # Parse date
+        parsed_date = parse_lead_date(date_brute, ref_date)
+        if parsed_date is None:
+            unattributed.append(UnattributedItem(nom=nom, raison="date non résolue"))
+            detail_rows.append(AttributeDetailItem(
+                nom=nom, titre=titre, date_brute=date_brute, date_parsee=None,
+                motivation=motivation, type_lead=type_lead, poids=poids,
+                post_id_attribue=None, date_post_attribue=None, eng_score_post=None,
+                fiabilite="date non résolue",
+            ))
+            continue
+
+        n_parsed += 1
+
+        # Attribute to post
+        attr = attribute_lead_to_post(parsed_date, posts_for_attr, window_days=window_days)
+        if attr is None:
+            unattributed.append(UnattributedItem(nom=nom, raison="hors fenêtre"))
+            detail_rows.append(AttributeDetailItem(
+                nom=nom, titre=titre, date_brute=date_brute,
+                date_parsee=str(parsed_date),
+                motivation=motivation, type_lead=type_lead, poids=poids,
+                post_id_attribue=None, date_post_attribue=None, eng_score_post=None,
+                fiabilite="hors fenêtre",
+            ))
+            continue
+
+        n_attributed += 1
+        fiab = f"estimée (fenêtre {window_days}j)"
+        detail_rows.append(AttributeDetailItem(
+            nom=nom, titre=titre, date_brute=date_brute,
+            date_parsee=str(parsed_date),
+            motivation=motivation, type_lead=type_lead, poids=poids,
+            post_id_attribue=attr.post_id,
+            date_post_attribue=str(attr.post_date),
+            eng_score_post=attr.eng_score,
+            fiabilite=fiab,
+        ))
+        attribution_records.append({
+            "post_id_attribue": attr.post_id,
+            "poids": poids,
+            "nom_prenom": nom,
+            "type_lead": type_lead,
+        })
+
+    # --- Aggregate ---
+    proposed: list[ProposedLeadRow] = []
+    if attribution_records:
+        attr_df = pd.DataFrame(attribution_records)
+        agg = aggregate_attribution(attr_df)
+        for _, agg_row in agg.iterrows():
+            proposed.append(ProposedLeadRow(
+                post_id=str(agg_row["post_id_attribue"]),
+                qualified_contacts=float(agg_row["weighted_count"]),
+                raw_count=int(agg_row["raw_count"]),
+                weighted_count=float(agg_row["weighted_count"]),
+            ))
+
+    n_total = len(leads_df)
+    return AttributeResponse(
+        n_leads_total=n_total,
+        n_leads_parsed_date=n_parsed,
+        n_leads_attributed=n_attributed,
+        n_leads_unattributed=n_total - n_attributed,
+        unattributed=unattributed,
+        proposed_leads_csv=proposed,
+        detail=detail_rows,
+        estimation=True,
+    )
+
+
+@app.post("/api/leads/attribute/apply", response_model=ApplyLeadsResponse)
+def apply_leads(req: ApplyLeadsRequest) -> ApplyLeadsResponse:
+    """Applique les leads proposés dans leads.csv de façon atomique.
+
+    Crée un snapshot horodaté dans data/snapshots/ AVANT l'écriture.
+    merge_strategy :
+      - "add"     : ajoute les qualified_contacts aux valeurs existantes
+      - "replace" : écrase les valeurs existantes
+    """
+    import tempfile
+    import shutil
+    import datetime as _dt
+
+    # --- Snapshot AVANT écriture ---
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    snapshot_path = SNAPSHOT_DIR / f"leads_{ts}.csv"
+
+    existing_rows: list[dict[str, Any]] = []
+    if LEADS_CSV.exists():
+        try:
+            existing_rows = pd.read_csv(LEADS_CSV).to_dict("records")
+        except Exception:
+            pass
+
+    # Écrire snapshot (même si vide)
+    snap_df = pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame(
+        columns=["post_id", "qualified_contacts"]
+    )
+    snap_df.to_csv(snapshot_path, index=False)
+
+    # --- Merge ---
+    # Construire un dict existant : post_id → qualified_contacts
+    existing_map: dict[str, float] = {
+        str(r.get("post_id", "")): float(r.get("qualified_contacts", 0))
+        for r in existing_rows
+    }
+
+    for item in req.proposed_leads_csv:
+        if req.merge_strategy == "add":
+            existing_map[item.post_id] = existing_map.get(item.post_id, 0.0) + item.qualified_contacts
+        else:  # "replace"
+            existing_map[item.post_id] = item.qualified_contacts
+
+    # --- Écriture atomique ---
+    merged_rows = [
+        {"post_id": k, "qualified_contacts": v}
+        for k, v in existing_map.items()
+    ]
+    out_df = pd.DataFrame(merged_rows)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=DATA_DIR, suffix=".tmp", delete=False, newline=""
+    ) as tmp:
+        out_df.to_csv(tmp, index=False)
+        tmp_path = tmp.name
+    shutil.move(tmp_path, str(LEADS_CSV))
+
+    return ApplyLeadsResponse(
+        applied=len(req.proposed_leads_csv),
+        snapshot=str(snapshot_path.name),
+    )
+
+
 def _append_lead(post_id: str, leads: int) -> None:
     """Atomically append a lead entry to leads.csv."""
     import tempfile, shutil

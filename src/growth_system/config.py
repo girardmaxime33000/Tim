@@ -35,3 +35,22 @@ class SystemConfig(BaseModel):
     cusum: CusumConfig = CusumConfig()
     reward: RewardWeights = RewardWeights()
     seed: int = 42
+
+
+# ---------------------------------------------------------------------------
+# Attribution leads
+# ---------------------------------------------------------------------------
+
+DEFAULT_TYPE_WEIGHTS: dict[str, float] = {
+    "Artiste": 1.0,
+    "Artiste/galerie": 1.0,
+    "Galerie": 1.0,
+    "Partenaire": 0.9,
+    "Partenaire artistique": 0.9,
+    "Prestataire": 0.4,
+    "Média": 0.5,
+    "Autre": 0.3,
+    "À vérifier": 0.5,
+}
+
+DEFAULT_ATTRIBUTION_WEIGHT_FALLBACK: float = 0.5

@@ -131,11 +131,11 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 </header>
 
 <nav>
-  <button class="active" onclick="showTab('scoreur')">Scoreur</button>
+  <button class="active" onclick="showTab('profil')">Profil / MAJ</button>
+  <button onclick="showTab('scoreur')">Scoreur</button>
   <button onclick="showTab('bandit')">Bandit</button>
   <button onclick="showTab('monitor')">Monitoring</button>
   <button onclick="showTab('leads')">Leads &amp; Backtest</button>
-  <button onclick="showTab('profil')">Corpus</button>
 </nav>
 
 <main>
@@ -143,7 +143,7 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <!-- ONGLET 1 — Profil / MAJ                                               -->
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
-<div id="tab-profil" class="tab">
+<div id="tab-profil" class="tab active">
 
   <div class="card">
     <h2>Mise à jour du profil</h2>
@@ -192,7 +192,7 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <!-- ONGLET 2 — Scoreur                                                    -->
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
-<div id="tab-scoreur" class="tab active">
+<div id="tab-scoreur" class="tab">
 
   <div class="row">
     <div class="col" style="flex:2">
@@ -519,6 +519,89 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
         <canvas id="chart-backtest-regret"></canvas>
         <h3 style="margin-top:14px">Posteriors P2 par archétype</h3>
         <canvas id="chart-backtest-post"></canvas>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ── Import leads depuis export connexions LinkedIn ─────────────────── -->
+  <div class="card" style="margin-top:16px">
+    <h2>Importer des leads depuis un export de connexions</h2>
+
+    <div class="msg warn" style="margin-bottom:12px">
+      ⚠ Estimation par inférence temporelle — LinkedIn ne fournit pas de lien direct
+      entre une connexion et un post. Vérifiez la cohérence avant d'appliquer.
+    </div>
+
+    <div class="row" style="align-items:flex-end;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+      <div>
+        <label>Fichier CSV (export connexions LinkedIn)</label>
+        <input id="attr-file" type="file" accept=".csv" style="display:block;margin-top:4px">
+      </div>
+      <div style="width:110px">
+        <label>Fenêtre (jours)</label>
+        <input id="attr-window" type="number" min="1" max="30" value="7">
+      </div>
+      <div style="width:130px">
+        <label>Date référence (ISO)</label>
+        <input id="attr-refdate" type="date" placeholder="laisser vide = aujourd'hui">
+      </div>
+      <div>
+        <button class="primary" id="attr-btn" onclick="doAttributeLeads()">Analyser</button>
+      </div>
+    </div>
+
+    <div id="attr-spinner" style="display:none;color:var(--text-dim)">Analyse… <span class="spin"></span></div>
+
+    <!-- Compteurs résultat -->
+    <div id="attr-counts" style="display:none;margin-bottom:10px;font-size:12px;color:var(--text-dim)"></div>
+
+    <!-- Table détaillée -->
+    <div id="attr-detail-wrap" style="display:none">
+      <h3 style="margin:10px 0 6px">Détail par lead</h3>
+      <div style="overflow-x:auto">
+        <table id="attr-detail-table">
+          <thead>
+            <tr>
+              <th onclick="sortAttrTable(0)" style="cursor:pointer">Nom ↕</th>
+              <th onclick="sortAttrTable(1)" style="cursor:pointer">Date ↕</th>
+              <th>Type</th>
+              <th onclick="sortAttrTable(3)" style="cursor:pointer">Poids ↕</th>
+              <th>Post attribué</th>
+              <th onclick="sortAttrTable(5)" style="cursor:pointer">Date post ↕</th>
+              <th>Fiabilité</th>
+            </tr>
+          </thead>
+          <tbody id="attr-detail-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Non attribués -->
+    <div id="attr-unattr-wrap" style="display:none;margin-top:10px">
+      <h3 style="margin-bottom:6px">Non attribués</h3>
+      <ul id="attr-unattr-list" style="font-size:12px;color:var(--text-dim);padding-left:18px"></ul>
+    </div>
+
+    <!-- Appliquer -->
+    <div id="attr-apply-wrap" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+      <div class="row" style="align-items:center;gap:12px">
+        <div>
+          <label>Stratégie de fusion</label>
+          <select id="attr-strategy" style="margin-top:4px">
+            <option value="add">add — additionner</option>
+            <option value="replace">replace — écraser</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:flex-end">
+          <button class="primary" id="attr-apply-btn" onclick="doApplyLeads()">
+            Appliquer à leads.csv
+          </button>
+        </div>
+        <div id="attr-apply-status" style="font-size:12px;color:var(--text-dim)"></div>
+      </div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:6px">
+        ⚠ Cette action modifie leads.csv. Un snapshot est créé automatiquement avant l'écriture.
       </div>
     </div>
   </div>
@@ -1157,9 +1240,128 @@ async function doBacktest() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Attribution leads LinkedIn → posts
+// ─────────────────────────────────────────────────────────────────────────
+
+let _attrProposed = [];  // stocke les proposed_leads_csv pour l'apply
+
+async function doAttributeLeads() {
+  const fileInput = document.getElementById('attr-file');
+  if (!fileInput.files.length) { alert('Choisissez un fichier CSV.'); return; }
+
+  const btn = document.getElementById('attr-btn');
+  btn.disabled = true;
+  document.getElementById('attr-spinner').style.display = '';
+  document.getElementById('attr-counts').style.display = 'none';
+  document.getElementById('attr-detail-wrap').style.display = 'none';
+  document.getElementById('attr-unattr-wrap').style.display = 'none';
+  document.getElementById('attr-apply-wrap').style.display = 'none';
+
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+  fd.append('window_days', document.getElementById('attr-window').value || '7');
+  const rd = document.getElementById('attr-refdate').value;
+  if (rd) fd.append('reference_date', rd);
+
+  try {
+    const r = await fetch('/api/leads/attribute', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+
+    _attrProposed = data.proposed_leads_csv || [];
+
+    // Compteurs
+    document.getElementById('attr-counts').style.display = '';
+    document.getElementById('attr-counts').innerHTML =
+      `Total : <b>${data.n_leads_total}</b> &nbsp;|&nbsp; ` +
+      `Dates résolues : <b>${data.n_leads_parsed_date}</b> &nbsp;|&nbsp; ` +
+      `Attribués : <b>${data.n_leads_attributed}</b> &nbsp;|&nbsp; ` +
+      `Non attribués : <b>${data.n_leads_unattributed}</b> &nbsp;|&nbsp; ` +
+      `<span style="color:var(--accent)">⚠ Estimation</span>`;
+
+    // Table détail
+    if (data.detail && data.detail.length) {
+      document.getElementById('attr-detail-wrap').style.display = '';
+      document.getElementById('attr-detail-body').innerHTML = data.detail.map(d => `<tr>
+        <td>${esc(d.nom)}</td>
+        <td>${d.date_parsee || '<span style="color:var(--text-dim)">—</span>'}</td>
+        <td>${esc(d.type_lead)}</td>
+        <td>${d.poids}</td>
+        <td>${d.post_id_attribue ? esc(d.post_id_attribue.slice(-20)) : '<span style="color:var(--text-dim)">—</span>'}</td>
+        <td>${d.date_post_attribue || '—'}</td>
+        <td style="font-size:10px;color:var(--text-dim)">${esc(d.fiabilite)}</td>
+      </tr>`).join('');
+    }
+
+    // Non attribués
+    if (data.unattributed && data.unattributed.length) {
+      document.getElementById('attr-unattr-wrap').style.display = '';
+      document.getElementById('attr-unattr-list').innerHTML =
+        data.unattributed.map(u => `<li>${esc(u.nom)} — <em>${esc(u.raison)}</em></li>`).join('');
+    }
+
+    // Bouton appliquer (seulement si des leads attribués)
+    if (_attrProposed.length > 0) {
+      document.getElementById('attr-apply-wrap').style.display = '';
+      document.getElementById('attr-apply-btn').disabled = false;
+    }
+  } catch (e) {
+    alert('Erreur : ' + e.message);
+  } finally {
+    btn.disabled = false;
+    document.getElementById('attr-spinner').style.display = 'none';
+  }
+}
+
+async function doApplyLeads() {
+  if (!_attrProposed.length) return;
+  const strategy = document.getElementById('attr-strategy').value;
+  const btn = document.getElementById('attr-apply-btn');
+  btn.disabled = true;
+  document.getElementById('attr-apply-status').textContent = 'Application…';
+
+  try {
+    const r = await fetch('/api/leads/attribute/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proposed_leads_csv: _attrProposed, merge_strategy: strategy }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    document.getElementById('attr-apply-status').textContent =
+      `✓ ${data.applied} post(s) mis à jour. Snapshot : ${data.snapshot}`;
+    loadLeads();
+  } catch (e) {
+    document.getElementById('attr-apply-status').textContent = 'Erreur : ' + e.message;
+    btn.disabled = false;
+  }
+}
+
+let _attrSortCol = -1, _attrSortAsc = true;
+function sortAttrTable(col) {
+  const tbody = document.getElementById('attr-detail-body');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  _attrSortAsc = (_attrSortCol === col) ? !_attrSortAsc : true;
+  _attrSortCol = col;
+  rows.sort((a, b) => {
+    const va = a.cells[col]?.textContent.trim() || '';
+    const vb = b.cells[col]?.textContent.trim() || '';
+    const na = parseFloat(va), nb = parseFloat(vb);
+    const cmp = isNaN(na) ? va.localeCompare(vb) : na - nb;
+    return _attrSortAsc ? cmp : -cmp;
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Init
 // ─────────────────────────────────────────────────────────────────────────
 
+loadProfile();
 </script>
 </body>
 </html>

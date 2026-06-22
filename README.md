@@ -253,8 +253,10 @@ pytest tests/ -v          # 130 tests
 | `test_decisional_p2.py` | 12 | Fraîcheur corpus : last\_ingest\_at, last\_retrain\_at, changepoint\_unaddressed |
 | `test_decisional_p3.py` | 17 | score\_log.csv, rework\_rate\_30d, bandes CUSUM, precision\_trend |
 
+| `test_leads_attribution.py` | 22 | Attribution leads : parse dates FR, fenêtre, agrégation, endpoints |
+
 ```bash
-pytest tests/ -v          # 219 tests
+pytest tests/ -v          # 241 tests
 ```
 
 ---
@@ -283,6 +285,39 @@ Zones colorées sur le graphe de croissance pour chaque phase d'accélération d
 
 ### Tendance précision@20% (`precision_log.csv`)
 Courbe historique de la précision@20% du scoreur, mise à jour à chaque ingestion.
+
+---
+
+## Attribution leads LinkedIn → posts (outil de rattrapage ponctuel)
+
+L'onglet **Leads & Backtest** expose une section *Importer des leads depuis un export de connexions*.
+
+### Principe
+
+L'export LinkedIn des connexions contient une date par connexion mais **pas de lien direct vers un post**.  
+Le pipeline infère l'attribution par fenêtre temporelle : pour chaque connexion, on cherche  
+le post le plus engageant dans une fenêtre `[date_connexion − window_days, date_connexion]` (défaut 7 jours).
+
+### Utilisation
+
+1. Exporter les connexions LinkedIn (Données > Obtenir une copie de vos données > Connexions).
+2. Déposer le CSV dans la section dédiée, ajuster la fenêtre et la date de référence.
+3. Cliquer **Analyser** — *aucun fichier n'est modifié à cette étape*.
+4. Vérifier le détail (colonne Fiabilité = "estimée (fenêtre Nj)").
+5. Choisir la stratégie (`add` ou `replace`) puis **Appliquer à leads.csv**.
+
+Un snapshot horodaté est automatiquement créé dans `data/snapshots/` avant toute écriture.
+
+### Limites (§2)
+
+- **Estimation uniquement.** La correspondance connexion → post est une approximation temporelle,  
+  pas une donnée LinkedIn officielle. Toujours vérifier la cohérence avant d'appliquer.
+- **Biais de sélection.** Un post très engageant dans la fenêtre peut capter des leads  
+  qui ne l'ont pas réellement vu.
+- **Dates LinkedIn partielles.** LinkedIn n'expose que le jour de la semaine ou "Aujourd'hui"  
+  pour les connexions récentes ; les dates absolues sont déduites par inférence d'année.
+- **Pas de suppression.** L'outil ajoute ou remplace des entrées dans `leads.csv` mais  
+  ne supprime jamais de lignes existantes.
 
 ---
 
