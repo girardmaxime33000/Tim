@@ -1,0 +1,7 @@
+# Fichiers générés à l'exécution — ne pas versionner
+last_ingest.json
+score_log.csv
+precision_log.csv
+backtest_posteriors.json
+backtest_results.png
+snapshots/

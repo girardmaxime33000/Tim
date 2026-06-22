@@ -152,7 +152,7 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
     <div class="row" style="margin-bottom:12px">
       <div class="col">
         <label>URL du profil LinkedIn</label>
-        <input id="profile-url" type="text" value="https://www.linkedin.com/in/timothee-roy/">
+        <input id="profile-url" type="text" value="https://www.linkedin.com/in/timoth%C3%A9e-roy-3a5492172/">
       </div>
       <div style="display:flex;align-items:flex-end;gap:8px">
         <button class="secondary" onclick="openProfile()">Ouvrir profil + extension ↗</button>
@@ -287,6 +287,19 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <div id="tab-monitor" class="tab">
 
+  <!-- Bandeau fraîcheur leads (sticky) -->
+  <div id="leads-coverage-banner" style="display:none;position:sticky;top:0;z-index:100;margin-bottom:12px;padding:10px 16px;border-radius:6px;font-size:12px;border:1px solid var(--border)">
+    <span id="leads-coverage-text"></span>
+  </div>
+
+  <!-- Carte fraîcheur -->
+  <div class="card" id="freshness-card" style="margin-bottom:12px">
+    <h2>Fraîcheur du système</h2>
+    <div id="freshness-body" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;color:var(--text-dim);font-size:12px">
+      Chargement…
+    </div>
+  </div>
+
   <div class="card" id="monitor-alarm-banner" style="display:none;border-color:var(--amber)">
     <span style="color:var(--amber)">&#9888; Rupture de régime détectée — ré-entraînement recommandé.</span>
     <span id="alarm-detail" style="color:var(--text-dim);margin-left:8px"></span>
@@ -318,6 +331,28 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
   </div>
 
   <div class="card">
+    <h2>Posteriors bandit EN DIRECT</h2>
+    <div id="chart-bandit-live" class="plotly-chart"></div>
+  </div>
+
+  <div class="card">
+    <h2>Leads par archétype</h2>
+    <table id="leads-by-archetype-table">
+      <thead>
+        <tr>
+          <th>Archétype</th>
+          <th>Taux de queue</th>
+          <th>Leads cumulés</th>
+          <th>Leads / post</th>
+        </tr>
+      </thead>
+      <tbody id="leads-by-archetype-body">
+        <tr><td colspan="4" style="color:var(--text-dim)">Chargement…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
     <h2>Totaux</h2>
     <div id="monitor-totals" style="color:var(--text-dim)">Chargement…</div>
   </div>
@@ -328,6 +363,31 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
       <thead><tr><th>Date</th><th>Direction</th><th>Statistique</th></tr></thead>
       <tbody id="alarms-body"><tr><td colspan="3" style="color:var(--text-dim)">—</td></tr></tbody>
     </table>
+  </div>
+
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <h2>Précision@20% dans le temps</h2>
+        <div id="chart-precision-trend" class="plotly-chart"></div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h2>Derniers brouillons scorés</h2>
+        <div style="color:var(--text-dim);font-size:11px;margin-bottom:8px">
+          Taux de rework (30j) : <strong id="rework-rate" style="font-size:14px">—</strong>
+        </div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr><th>Date</th><th>Extrait</th><th>P(queue)</th><th>Verdict</th></tr></thead>
+            <tbody id="scoring-recent-body">
+              <tr><td colspan="4" style="color:var(--text-dim)">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </div>
 
   <button class="secondary" onclick="loadMonitor()" style="margin-top:4px">Rafraîchir monitoring</button>
@@ -846,6 +906,35 @@ async function loadMonitor() {
     if (figs.distribution) renderFig('chart-distribution', figs.distribution);
     if (figs.cusum)        renderFig('chart-cusum', figs.cusum);
     if (figs.bandit)       renderFig('chart-bandit', figs.bandit);
+    if (figs.bandit_live)      renderFig('chart-bandit-live', figs.bandit_live);
+    if (figs.precision_trend)  renderFig('chart-precision-trend', figs.precision_trend);
+
+    // Leads coverage banner
+    const banner = document.getElementById('leads-coverage-banner');
+    const cov = r.leads_coverage;
+    if (cov) {
+      const pct = (cov.ratio * 100).toFixed(0);
+      const txt = `${cov.n_with_leads}/${cov.n_total} posts avec leads saisis (${pct}%)`;
+      document.getElementById('leads-coverage-text').textContent =
+        cov.ratio < 0.5
+          ? `⚠ ${txt} — le système optimise le reach, pas la conversion.`
+          : `✓ ${txt}`;
+      banner.style.display = '';
+      banner.style.background = cov.ratio < 0.5 ? 'rgba(255,152,0,.12)' : 'rgba(76,175,80,.10)';
+      banner.style.borderColor = cov.ratio < 0.5 ? 'var(--amber)' : 'var(--green)';
+      document.getElementById('leads-coverage-text').style.color = cov.ratio < 0.5 ? 'var(--amber)' : 'var(--green)';
+    }
+
+    // Leads by archetype table
+    const lba = r.leads_by_archetype || [];
+    document.getElementById('leads-by-archetype-body').innerHTML = lba.length
+      ? lba.map(item => `<tr>
+          <td><span class="tag tag-${item.archetype}">${item.archetype}</span></td>
+          <td>${(item.tail_rate * 100).toFixed(1)}%</td>
+          <td>${item.leads_total}</td>
+          <td>${item.leads_per_post.toFixed(2)}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="4" style="color:var(--text-dim)">Aucune donnée</td></tr>';
 
     // Totals
     const t = r.totals;
@@ -855,6 +944,39 @@ async function loadMonitor() {
         <div class="col"><div style="color:var(--text-dim);font-size:11px">Abonnés gagnés</div><div style="font-size:20px">${t.new_followers.toLocaleString('fr')}</div></div>
         <div class="col"><div style="color:var(--text-dim);font-size:11px">Impressions/j (moy.)</div><div style="font-size:20px">${t.avg_daily_impressions.toFixed(0)}</div></div>
       </div>`;
+
+    // Freshness card
+    const fr = r.freshness || {};
+    const _age = (iso) => {
+      if (!iso) return '<span style="color:var(--text-dim)">inconnu</span>';
+      const d = new Date(iso);
+      const days = Math.floor((Date.now() - d) / 86400000);
+      return `<span>${days} j  <span style="color:var(--text-dim);font-size:11px">(${iso.slice(0,10)})</span></span>`;
+    };
+    const _cpFlag = fr.changepoint_unaddressed
+      ? '<span style="color:var(--amber)"> ⚠ NON TRAITÉE</span>' : '';
+    document.getElementById('freshness-body').innerHTML = `
+      <div><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Dernière ingestion</div>${_age(fr.last_ingest_at)}</div>
+      <div><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Dernier ré-entraînement</div>${_age(fr.last_retrain_at)}</div>
+      <div><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Dernière alarme CUSUM</div>${_age(fr.last_changepoint_at)}${_cpFlag}</div>`;
+
+    // Scoring recent card
+    const sr = r.scoring_recent || [];
+    const rr = r.rework_rate_30d ?? 0;
+    document.getElementById('scoring-recent-body').innerHTML = sr.length
+      ? sr.map(s => {
+          const verdictColor = s.verdict === 'publish' ? 'var(--green)'
+            : s.verdict === 'optimize' ? 'var(--amber)' : 'var(--red)';
+          return `<tr>
+            <td style="color:var(--text-dim);font-size:10px">${(s.timestamp||'').slice(0,16)}</td>
+            <td style="max-width:200px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${s.text_excerpt||''}</td>
+            <td>${(s.p_queue*100||0).toFixed(1)}%</td>
+            <td style="color:${verdictColor}">${s.verdict||''}</td>
+          </tr>`;
+        }).join('')
+      : '<tr><td colspan="4" style="color:var(--text-dim)">Aucun scoring récent</td></tr>';
+    document.getElementById('rework-rate').textContent = (rr * 100).toFixed(1) + '%';
+    document.getElementById('rework-rate').style.color = rr > 0.5 ? 'var(--red)' : rr > 0.3 ? 'var(--amber)' : 'var(--green)';
 
     // Alarms table
     document.getElementById('alarms-body').innerHTML = r.alarms.length
