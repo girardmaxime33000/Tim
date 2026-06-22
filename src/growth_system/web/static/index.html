@@ -564,12 +564,13 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
           <thead>
             <tr>
               <th onclick="sortAttrTable(0)" style="cursor:pointer">Nom ↕</th>
-              <th onclick="sortAttrTable(1)" style="cursor:pointer">Date ↕</th>
+              <th onclick="sortAttrTable(1)" style="cursor:pointer">Date connexion ↕</th>
               <th>Type</th>
               <th onclick="sortAttrTable(3)" style="cursor:pointer">Poids ↕</th>
               <th>Post attribué</th>
               <th onclick="sortAttrTable(5)" style="cursor:pointer">Date post ↕</th>
-              <th>Fiabilité</th>
+              <th title="Fiabilité de l'attribution lead → post (inférence temporelle)">Attribution</th>
+              <th title="Fiabilité de la date du post attribué (exacte ou reconstruite)">Date post</th>
             </tr>
           </thead>
           <tbody id="attr-detail-body"></tbody>
@@ -1282,15 +1283,27 @@ async function doAttributeLeads() {
     // Table détail
     if (data.detail && data.detail.length) {
       document.getElementById('attr-detail-wrap').style.display = '';
-      document.getElementById('attr-detail-body').innerHTML = data.detail.map(d => `<tr>
-        <td>${esc(d.nom)}</td>
-        <td>${d.date_parsee || '<span style="color:var(--text-dim)">—</span>'}</td>
-        <td>${esc(d.type_lead)}</td>
-        <td>${d.poids}</td>
-        <td>${d.post_id_attribue ? esc(d.post_id_attribue.slice(-20)) : '<span style="color:var(--text-dim)">—</span>'}</td>
-        <td>${d.date_post_attribue || '—'}</td>
-        <td style="font-size:10px;color:var(--text-dim)">${esc(d.fiabilite)}</td>
-      </tr>`).join('');
+      document.getElementById('attr-detail-body').innerHTML = data.detail.map(d => {
+        const fdp = d.fiabilite_date_post;
+        let fdpCell;
+        if (!fdp) {
+          fdpCell = '<span style="color:var(--text-dim)">—</span>';
+        } else if (fdp.startsWith('exacte')) {
+          fdpCell = `<span style="color:var(--green);font-size:10px">${esc(fdp)}</span>`;
+        } else {
+          fdpCell = `<span style="color:var(--amber);font-size:10px">${esc(fdp)}</span>`;
+        }
+        return `<tr>
+          <td>${esc(d.nom)}</td>
+          <td>${d.date_parsee || '<span style="color:var(--text-dim)">—</span>'}</td>
+          <td>${esc(d.type_lead)}</td>
+          <td>${d.poids}</td>
+          <td>${d.post_id_attribue ? esc(d.post_id_attribue.slice(-20)) : '<span style="color:var(--text-dim)">—</span>'}</td>
+          <td>${d.date_post_attribue || '<span style="color:var(--text-dim)">—</span>'}</td>
+          <td style="font-size:10px;color:var(--text-dim)">${esc(d.fiabilite)}</td>
+          <td>${fdpCell}</td>
+        </tr>`;
+      }).join('');
     }
 
     // Non attribués
