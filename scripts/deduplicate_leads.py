@@ -38,7 +38,7 @@ def main() -> None:
         print("Aucun fichier data/leads.csv trouvé. Rien à faire.")
         return
 
-    df = pd.read_csv(LEADS_CSV)
+    df = pd.read_csv(LEADS_CSV, dtype={"post_id": str})
     if df.empty:
         print("data/leads.csv est vide. Rien à faire.")
         return

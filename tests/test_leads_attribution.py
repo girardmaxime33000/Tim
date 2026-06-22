@@ -593,3 +593,45 @@ def test_upsert_lead_deduplication_by_url(tmp_path: Path, monkeypatch: pytest.Mo
     assert len(df) == 1, f"Attendu 1 ligne, obtenu {len(df)}"
     assert str(df.iloc[0]["post_id"]) == activity_id
     assert int(df.iloc[0]["qualified_contacts"]) == 5
+
+
+def test_post_id_19digits_survives_write_read_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Un post_id à 19 chiffres doit survivre identique à un cycle write→read→write→read.
+
+    Régression : pandas infère int64 sur un ID numérique seul, puis str(numpy.int64)
+    peut produire la notation scientifique (ex: '7.449e+18') selon la plateforme,
+    corrompant l'ID stocké.
+    """
+    import growth_system.web.api as api_mod
+    monkeypatch.setattr(api_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(api_mod, "LEADS_CSV", tmp_path / "leads.csv")
+
+    from fastapi.testclient import TestClient
+    from growth_system.web.api import app
+    client = TestClient(app)
+
+    # ID à 19 chiffres — ne tient pas dans un float64 sans perte de précision
+    pid_19 = "7449370799741898752"
+
+    # Cycle 1 : écriture via POST /api/leads
+    r = client.post("/api/leads", json={"post_id": pid_19, "qualified_contacts": 3})
+    assert r.status_code == 200
+    assert r.json()["post_id"] == pid_19
+
+    # Lecture brute du CSV — le post_id doit être la chaîne exacte, pas la notation sci
+    raw = (tmp_path / "leads.csv").read_text()
+    assert "7.449" not in raw, f"Notation scientifique détectée dans le CSV : {raw!r}"
+    assert pid_19 in raw, f"ID attendu absent du CSV : {raw!r}"
+
+    # Cycle 2 : second upsert → relecture → même garantie
+    r2 = client.post("/api/leads", json={"post_id": pid_19, "qualified_contacts": 5})
+    assert r2.status_code == 200
+    raw2 = (tmp_path / "leads.csv").read_text()
+    assert "7.449" not in raw2
+    assert pid_19 in raw2
+
+    # Lecture via pandas sans dtype forcé — comme le ferait un script naïf
+    df = pd.read_csv(tmp_path / "leads.csv", dtype={"post_id": str})
+    assert df.iloc[0]["post_id"] == pid_19, (
+        f"post_id corrompu après relecture pandas : {df.iloc[0]['post_id']!r}"
+    )

@@ -590,7 +590,7 @@ def monitor() -> MonitorResponse:
         leads_map: dict[str, int] = {}  # post_id (= permalink) -> qualified_contacts
         if LEADS_CSV.exists() and LEADS_CSV.stat().st_size > 0:
             try:
-                lf = pd.read_csv(LEADS_CSV)
+                lf = pd.read_csv(LEADS_CSV, dtype={"post_id": str})
                 for _, lr in lf.iterrows():
                     leads_map[str(lr["post_id"])] = int(lr.get("qualified_contacts", 0))
             except Exception:
@@ -713,7 +713,7 @@ def get_leads() -> LeadsResponse:
     """Return all manually-entered leads."""
     if not LEADS_CSV.exists():
         return LeadsResponse(leads=[], total_leads=0)
-    df = pd.read_csv(LEADS_CSV)
+    df = pd.read_csv(LEADS_CSV, dtype={"post_id": str})
     items = [
         LeadItem(post_id=str(r["post_id"]), qualified_contacts=int(r["qualified_contacts"]))
         for _, r in df.iterrows()
@@ -727,7 +727,7 @@ def upsert_lead(req: LeadItem) -> LeadUpsertResponse:
     req.post_id = normalize_post_id(req.post_id)
     rows: list[dict[str, Any]] = []
     if LEADS_CSV.exists():
-        rows = pd.read_csv(LEADS_CSV).to_dict("records")
+        rows = pd.read_csv(LEADS_CSV, dtype={"post_id": str}).to_dict("records")
     action = "created"
     found = False
     for row in rows:
@@ -781,7 +781,7 @@ def run_backtest_endpoint() -> BacktestResponse:
     if not MODEL_PATH.exists():
         raise HTTPException(status_code=404, detail="scorer_model.json introuvable.")
 
-    leads_empty = not LEADS_CSV.exists() or pd.read_csv(LEADS_CSV).empty if LEADS_CSV.exists() else True
+    leads_empty = not LEADS_CSV.exists() or pd.read_csv(LEADS_CSV, dtype={"post_id": str}).empty if LEADS_CSV.exists() else True
 
     plot_path = str(DATA_DIR / "backtest_results.png")
 
@@ -1471,7 +1471,7 @@ def apply_leads(req: ApplyLeadsRequest) -> ApplyLeadsResponse:
     existing_rows: list[dict[str, Any]] = []
     if LEADS_CSV.exists():
         try:
-            existing_rows = pd.read_csv(LEADS_CSV).to_dict("records")
+            existing_rows = pd.read_csv(LEADS_CSV, dtype={"post_id": str}).to_dict("records")
         except Exception:
             pass
 
@@ -1482,9 +1482,11 @@ def apply_leads(req: ApplyLeadsRequest) -> ApplyLeadsResponse:
     snap_df.to_csv(snapshot_path, index=False)
 
     # --- Merge ---
-    # Construire un dict existant : post_id → qualified_contacts
+    # Construire un dict existant : post_id (canonique, str) → qualified_contacts
+    # On passe par normalize_post_id pour corriger d'éventuels IDs déjà stockés en
+    # notation scientifique (ex: "7.449e+18") issus d'une ancienne lecture sans dtype=str.
     existing_map: dict[str, float] = {
-        str(r.get("post_id", "")): float(r.get("qualified_contacts", 0))
+        normalize_post_id(str(r.get("post_id", ""))): float(r.get("qualified_contacts", 0))
         for r in existing_rows
     }
 
@@ -1521,7 +1523,7 @@ def _append_lead(post_id: str, leads: int) -> None:
     post_id = normalize_post_id(post_id)
     rows: list[dict[str, Any]] = []
     if LEADS_CSV.exists():
-        rows = pd.read_csv(LEADS_CSV).to_dict("records")
+        rows = pd.read_csv(LEADS_CSV, dtype={"post_id": str}).to_dict("records")
     # upsert
     found = False
     for row in rows:
