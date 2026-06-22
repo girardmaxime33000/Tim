@@ -46,7 +46,7 @@ Le système ne touche pas à la rédaction. Il filtre, oriente et mesure.
 pip install -e .
 ```
 
-Dépendances : `numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`, `pydantic>=2`, `typer`.
+Dépendances : `numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`, `plotly`, `fastapi`, `pydantic>=2`, `typer`.
 
 ---
 
@@ -72,7 +72,7 @@ Onglet Profil/MAJ  → déposer l'export CSV de l'extension li-posts-export
 Onglet Scoreur     → coller le brouillon → P(queue), verdict, suggestions
 Onglet Bandit      → recommander l'archétype du jour
                    → enregistrer le résultat après publication
-Onglet Monitoring  → graphes audience, alarmes CUSUM
+Onglet Monitoring  → graphes audience, alarmes CUSUM, dashboards décisionnels
 Onglet Leads       → saisir les leads manuellement + lancer le backtest
 ```
 
@@ -249,6 +249,40 @@ pytest tests/ -v          # 130 tests
 | `test_web_api.py` | 31 | Tous les endpoints jalon 1 (health/profile/score/recommend/update) |
 | `test_web_ingest.py` | 39 | Ingest sur fixture réelle, merge, garde-fous, atomicité |
 | `test_web_jalon3.py` | 27 | Monitor / Leads / Backtest |
+| `test_decisional_p1.py` | 19 | Bandit live (posteriors Beta) + couverture leads + table par archétype |
+| `test_decisional_p2.py` | 12 | Fraîcheur corpus : last\_ingest\_at, last\_retrain\_at, changepoint\_unaddressed |
+| `test_decisional_p3.py` | 17 | score\_log.csv, rework\_rate\_30d, bandes CUSUM, precision\_trend |
+
+```bash
+pytest tests/ -v          # 219 tests
+```
+
+---
+
+## Dashboards décisionnels (onglet Monitoring)
+
+### Bandit live — posteriors Beta
+Courbes Beta en temps réel pour chaque archétype (Thompson Sampling γ = 0.985).  
+Recommandation active mise en évidence. Source : `data/growth_state.json`.
+
+### Couverture leads
+Bannière orange si < 50 % des posts LinkedIn sont rattachés à un lead, verte sinon.  
+Table de répartition leads par archétype.
+
+### Carte de fraîcheur
+Trois KPI : dernière ingestion (`last_ingest.json`), dernier ré-entraînement  
+(`scorer_model.json → trained_at`), dernier changepoint CUSUM.  
+Flag `changepoint_unaddressed` : alerte si un changepoint n'a pas été suivi d'un ré-entraînement.
+
+### Journal de scoring (`score_log.csv`)
+Chaque appel à `/api/score` est journalisé : timestamp, extrait, P(queue), verdict, format.  
+Taux de rework sur 30 jours visible dans la carte Monitoring.
+
+### Bandes d'accélération CUSUM
+Zones colorées sur le graphe de croissance pour chaque phase d'accélération détectée.
+
+### Tendance précision@20% (`precision_log.csv`)
+Courbe historique de la précision@20% du scoreur, mise à jour à chaque ingestion.
 
 ---
 
