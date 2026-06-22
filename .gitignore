@@ -10,3 +10,4 @@ growth_state.json
 data/snapshots/
 data/leads.csv
 data/backtest_results.png
+data/backtest_posteriors.json
