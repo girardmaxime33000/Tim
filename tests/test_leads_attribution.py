@@ -355,3 +355,182 @@ def test_apply_creates_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
     snapshots = list(snapshot_dir.glob("leads_*.csv"))
     assert len(snapshots) >= 1, "Un snapshot doit être créé avant l'écriture"
+
+
+# ---------------------------------------------------------------------------
+# load_analytics_post_dates + enrichissement des dates de posts
+# ---------------------------------------------------------------------------
+
+
+def _make_analytics_xlsx(path: Path, rows: list[dict]) -> None:
+    """Crée un AggregateAnalytics_*.xlsx minimal avec feuille MEILLEURS POSTS.
+
+    rows = [{"url": "...", "date": "JJ/MM/AAAA"}, ...]
+    Simule deux blocs côte à côte (même colonnes dupliquées) pour couvrir la
+    déduplification.
+    """
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "MEILLEURS POSTS"
+    # Deux blocs : colonnes A-B (tri Interactions) et D-E (tri Impressions)
+    ws["A1"] = "URL du post"
+    ws["B1"] = "Date de publication du post"
+    ws["D1"] = "URL du post"
+    ws["E1"] = "Date de publication du post"
+    for i, row in enumerate(rows, start=2):
+        ws[f"A{i}"] = row["url"]
+        ws[f"B{i}"] = row["date"]
+        ws[f"D{i}"] = row["url"]   # doublon intentionnel
+        ws[f"E{i}"] = row["date"]
+    wb.save(path)
+
+
+def test_load_analytics_no_dir():
+    """Sans répertoire analytics → dict vide, pas d'erreur."""
+    from growth_system.leads_attribution import load_analytics_post_dates
+    result = load_analytics_post_dates(Path("/tmp/inexistant_analytics_xyz"))
+    assert result == {}
+
+
+def test_load_analytics_no_file(tmp_path: Path):
+    """Répertoire présent mais aucun fichier → dict vide."""
+    from growth_system.leads_attribution import load_analytics_post_dates
+    analytics_dir = tmp_path / "analytics"
+    analytics_dir.mkdir()
+    result = load_analytics_post_dates(analytics_dir)
+    assert result == {}
+
+
+def test_load_analytics_exact_dates(tmp_path: Path):
+    """Les URLs présentes dans MEILLEURS POSTS obtiennent leur date exacte."""
+    from growth_system.leads_attribution import load_analytics_post_dates
+    analytics_dir = tmp_path / "analytics"
+    analytics_dir.mkdir()
+    xlsx_path = analytics_dir / "AggregateAnalytics_2026-06-01.xlsx"
+    _make_analytics_xlsx(xlsx_path, [
+        {"url": "https://www.linkedin.com/posts/post-1", "date": "28/04/2026"},
+        {"url": "https://www.linkedin.com/posts/post-2", "date": "03/05/2026"},
+    ])
+    result = load_analytics_post_dates(analytics_dir)
+    assert result["https://www.linkedin.com/posts/post-1"] == date(2026, 4, 28)
+    assert result["https://www.linkedin.com/posts/post-2"] == date(2026, 5, 3)
+
+
+def test_load_analytics_deduplication(tmp_path: Path):
+    """Les URLs dupliquées (deux blocs) ne créent qu'une entrée."""
+    from growth_system.leads_attribution import load_analytics_post_dates
+    analytics_dir = tmp_path / "analytics"
+    analytics_dir.mkdir()
+    xlsx_path = analytics_dir / "AggregateAnalytics_2026-06-01.xlsx"
+    _make_analytics_xlsx(xlsx_path, [
+        {"url": "https://www.linkedin.com/posts/post-1", "date": "28/04/2026"},
+    ])
+    result = load_analytics_post_dates(analytics_dir)
+    assert len(result) == 1
+
+
+def test_load_analytics_picks_most_recent(tmp_path: Path):
+    """Quand plusieurs fichiers, le plus récent (tri nom) est utilisé."""
+    from growth_system.leads_attribution import load_analytics_post_dates
+    analytics_dir = tmp_path / "analytics"
+    analytics_dir.mkdir()
+    _make_analytics_xlsx(
+        analytics_dir / "AggregateAnalytics_2026-05-01.xlsx",
+        [{"url": "https://post-old", "date": "01/01/2026"}],
+    )
+    _make_analytics_xlsx(
+        analytics_dir / "AggregateAnalytics_2026-06-01.xlsx",
+        [{"url": "https://post-new", "date": "15/05/2026"}],
+    )
+    result = load_analytics_post_dates(analytics_dir)
+    assert "https://post-new" in result
+    assert "https://post-old" not in result
+
+
+def test_endpoint_fiabilite_date_post_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Les posts dont la date est dans MEILLEURS POSTS reçoivent fiabilite_date_post='exacte...'."""
+    import growth_system.web.api as api_mod
+    analytics_dir = tmp_path / "analytics"
+    analytics_dir.mkdir()
+
+    # posts.csv avec permalink = URL exacte
+    permalink = "https://www.linkedin.com/posts/post-exact"
+    posts_df = pd.DataFrame([
+        {"permalink": permalink, "days_ago": 10, "eng_score": 200.0,
+         "text": "Post exact", "format": "Text only", "likes": 20, "comments": 3, "shares": 1},
+    ])
+    posts_df.to_csv(tmp_path / "posts.csv", index=False)
+
+    # Fichier analytics avec date exacte pour ce post
+    _make_analytics_xlsx(
+        analytics_dir / "AggregateAnalytics_2026-06-20.xlsx",
+        [{"url": permalink, "date": "12/06/2026"}],
+    )
+
+    monkeypatch.setattr(api_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(api_mod, "LEADS_CSV", tmp_path / "leads.csv")
+    monkeypatch.setattr(api_mod, "POSTS_CSV", tmp_path / "posts.csv")
+    monkeypatch.setattr(api_mod, "SNAPSHOT_DIR", tmp_path / "snapshots")
+    monkeypatch.setattr(api_mod, "ANALYTICS_DIR", analytics_dir)
+
+    csv_bytes = _make_csv_bytes([
+        {"nom_prenom": "Alice", "titre": "Artiste", "date_connexion": "14 juin",
+         "motivation": "post inspirant", "type_lead": "Artiste"},
+    ])
+
+    from fastapi.testclient import TestClient
+    from growth_system.web.api import app
+    client = TestClient(app)
+
+    r = client.post(
+        "/api/leads/attribute",
+        files={"file": ("leads.csv", csv_bytes, "text/csv")},
+        data={"reference_date": "2026-06-22", "window_days": "14"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["n_leads_attributed"] == 1
+    detail = body["detail"][0]
+    assert detail["fiabilite_date_post"] == "exacte (MEILLEURS POSTS)"
+
+
+def test_endpoint_fiabilite_date_post_approximate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Un post absent de MEILLEURS POSTS reçoit fiabilite_date_post='approximative...'."""
+    import growth_system.web.api as api_mod
+
+    # Pas de répertoire analytics → aucun enrichissement
+    analytics_dir = tmp_path / "analytics"  # n'existe pas
+
+    permalink = "https://www.linkedin.com/posts/post-approx"
+    posts_df = pd.DataFrame([
+        {"permalink": permalink, "days_ago": 5, "eng_score": 100.0,
+         "text": "Post approx", "format": "Text only", "likes": 5, "comments": 1, "shares": 0},
+    ])
+    posts_df.to_csv(tmp_path / "posts.csv", index=False)
+
+    monkeypatch.setattr(api_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(api_mod, "LEADS_CSV", tmp_path / "leads.csv")
+    monkeypatch.setattr(api_mod, "POSTS_CSV", tmp_path / "posts.csv")
+    monkeypatch.setattr(api_mod, "SNAPSHOT_DIR", tmp_path / "snapshots")
+    monkeypatch.setattr(api_mod, "ANALYTICS_DIR", analytics_dir)
+
+    csv_bytes = _make_csv_bytes([
+        {"nom_prenom": "Bob", "titre": "Galerie", "date_connexion": "Aujourd'hui",
+         "motivation": "", "type_lead": "Galerie"},
+    ])
+
+    from fastapi.testclient import TestClient
+    from growth_system.web.api import app
+    client = TestClient(app)
+
+    r = client.post(
+        "/api/leads/attribute",
+        files={"file": ("leads.csv", csv_bytes, "text/csv")},
+        data={"reference_date": "2026-06-22", "window_days": "7"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["n_leads_attributed"] == 1
+    detail = body["detail"][0]
+    assert detail["fiabilite_date_post"] == "approximative (reconstruite)"

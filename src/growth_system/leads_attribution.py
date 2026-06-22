@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 
@@ -187,6 +188,59 @@ def attribute_lead_to_post(
         post_date=best["post_date"],
         eng_score=float(best["eng_score"]),
     )
+
+
+def load_analytics_post_dates(analytics_dir: Path) -> dict[str, date]:
+    """Charge les dates exactes de posts depuis le fichier AggregateAnalytics le plus récent.
+
+    Lit la feuille "MEILLEURS POSTS" du fichier AggregateAnalytics_*.xlsx le plus récent
+    dans analytics_dir, extrait les colonnes "URL du post" et "Date de publication du post"
+    (deux blocs côte à côte → déduplique par URL), et retourne {url: date}.
+
+    Retourne {} sans erreur si :
+    - analytics_dir n'existe pas
+    - aucun fichier AggregateAnalytics_*.xlsx présent
+    - la feuille est absente ou illisible
+    Le fallback approximatif existant prend le relais dans tous ces cas.
+    """
+    if not analytics_dir.exists():
+        return {}
+
+    xlsx_files = sorted(analytics_dir.glob("AggregateAnalytics_*.xlsx"))
+    if not xlsx_files:
+        return {}
+
+    latest = xlsx_files[-1]  # tri lexicographique AAAA-MM-JJ → le plus récent en dernier
+
+    try:
+        df = pd.read_excel(latest, sheet_name="MEILLEURS POSTS", header=0)
+    except Exception:
+        return {}
+
+    # Deux blocs côte à côte → les noms de colonnes peuvent être dupliqués.
+    # pandas les suffixe automatiquement (.1, .2 …). On repère toutes les colonnes
+    # dont le nom (sans suffixe numérique) contient les mots-clés attendus.
+    url_cols = [c for c in df.columns if "url" in str(c).lower()]
+    date_cols = [c for c in df.columns if "date de publication" in str(c).lower()]
+
+    result: dict[str, date] = {}
+    from datetime import datetime as _dt
+
+    for url_col, date_col in zip(url_cols, date_cols):
+        for url_val, date_val in zip(df[url_col], df[date_col]):
+            if pd.isna(url_val) or pd.isna(date_val):
+                continue
+            url_str = str(url_val).strip()
+            if not url_str:
+                continue
+            try:
+                d = _dt.strptime(str(date_val).strip(), "%d/%m/%Y").date()
+            except ValueError:
+                continue
+            if url_str not in result:  # première occurrence = déduplique
+                result[url_str] = d
+
+    return result
 
 
 def aggregate_attribution(attributed_leads: pd.DataFrame) -> pd.DataFrame:

@@ -387,6 +387,7 @@ def update(req: UpdateRequest) -> UpdateResponse:
 
 
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
+ANALYTICS_DIR = DATA_DIR / "raw" / "analytics"
 LAST_INGEST_JSON = DATA_DIR / "last_ingest.json"
 SCORE_LOG_CSV = DATA_DIR / "score_log.csv"
 PRECISION_LOG_CSV = DATA_DIR / "precision_log.csv"
@@ -1220,6 +1221,7 @@ class AttributeDetailItem(BaseModel):
     titre: str
     date_brute: str
     date_parsee: str | None
+    fiabilite_date_post: str | None = None  # "exacte (MEILLEURS POSTS)" | "approximative (reconstruite)"
     motivation: str
     type_lead: str
     poids: float
@@ -1317,11 +1319,12 @@ async def attribute_leads(
     posts_for_attr: pd.DataFrame = pd.DataFrame(
         columns=["post_id", "post_date", "eng_score"]
     )
+    exact_post_ids: set[str] = set()
     if POSTS_CSV.exists():
         try:
             pf = pd.read_csv(POSTS_CSV)
             import datetime as _dt
-            ingest_ref = _date(2026, 6, 22)  # fallback; use _INGEST_REF_DATE
+            ingest_ref = _date.today()
             try:
                 from growth_system.web.api import _INGEST_REF_DATE as _iref
                 ingest_ref = _iref
@@ -1333,6 +1336,16 @@ async def attribute_leads(
             pf = pf.dropna(subset=["post_date"])
             posts_for_attr = pf[["permalink", "post_date", "eng_score"]].copy()
             posts_for_attr = posts_for_attr.rename(columns={"permalink": "post_id"})
+
+            # Enrichissement avec dates exactes (AggregateAnalytics MEILLEURS POSTS)
+            from growth_system.leads_attribution import load_analytics_post_dates
+            analytics_dates = load_analytics_post_dates(ANALYTICS_DIR)
+            if analytics_dates:
+                for idx, post_row in posts_for_attr.iterrows():
+                    pid = str(post_row["post_id"])
+                    if pid in analytics_dates:
+                        posts_for_attr.at[idx, "post_date"] = analytics_dates[pid]
+                        exact_post_ids.add(pid)
         except Exception:
             pass
 
@@ -1362,6 +1375,7 @@ async def attribute_leads(
                 motivation=motivation, type_lead=type_lead, poids=poids,
                 post_id_attribue=None, date_post_attribue=None, eng_score_post=None,
                 fiabilite="date non résolue",
+                fiabilite_date_post=None,
             ))
             continue
 
@@ -1377,11 +1391,17 @@ async def attribute_leads(
                 motivation=motivation, type_lead=type_lead, poids=poids,
                 post_id_attribue=None, date_post_attribue=None, eng_score_post=None,
                 fiabilite="hors fenêtre",
+                fiabilite_date_post=None,
             ))
             continue
 
         n_attributed += 1
         fiab = f"estimée (fenêtre {window_days}j)"
+        fdp = (
+            "exacte (MEILLEURS POSTS)"
+            if attr.post_id in exact_post_ids
+            else "approximative (reconstruite)"
+        )
         detail_rows.append(AttributeDetailItem(
             nom=nom, titre=titre, date_brute=date_brute,
             date_parsee=str(parsed_date),
@@ -1390,6 +1410,7 @@ async def attribute_leads(
             date_post_attribue=str(attr.post_date),
             eng_score_post=attr.eng_score,
             fiabilite=fiab,
+            fiabilite_date_post=fdp,
         ))
         attribution_records.append({
             "post_id_attribue": attr.post_id,
