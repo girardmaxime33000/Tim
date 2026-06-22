@@ -42,11 +42,67 @@ Le système ne touche pas à la rédaction. Il filtre, oriente et mesure.
 
 ## Installation
 
+> **Règle d'or :** toutes les commandes du projet (`growth`, `pytest`,
+> `python scripts/…`) doivent s'exécuter depuis le **même environnement
+> virtuel**. Ne pas installer le package dans le Python global ni via
+> Homebrew — cela crée des environnements parallèles incompatibles.
+
+### Première installation (clone propre)
+
 ```bash
+# 1. Créer et activer le venv à la racine du repo
+python3 -m venv .venv
+source .venv/bin/activate        # macOS / Linux
+# .venv\Scripts\activate         # Windows (PowerShell)
+
+# 2. Installer le package en mode éditable avec toutes ses dépendances
 pip install -e .
+
+# 3. Vérifier
+growth --help                    # CLI disponible
+python -m pytest tests/ -q       # tous les tests doivent passer
+python scripts/deduplicate_leads.py  # script opérationnel
 ```
 
-Dépendances : `numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`, `pydantic>=2`, `typer`.
+Le venv est ignoré par git (`.gitignore` contient `.venv/`).
+
+### Sessions suivantes
+
+```bash
+# Toujours activer le venv avant de travailler
+source .venv/bin/activate
+
+growth serve                     # interface web
+```
+
+### Dépendances
+
+Toutes les dépendances sont déclarées dans `pyproject.toml` (section
+`[project] dependencies`) — `numpy`, `pandas`, `scipy`, `scikit-learn`,
+`matplotlib`, `plotly`, `fastapi`, `pydantic>=2`, `typer`, `openpyxl`,
+`uvicorn`, `python-multipart`. Pas de `requirements.txt` séparé à
+maintenir.
+
+### Résolution du conflit Homebrew / Python système (macOS)
+
+Si `which growth` → `/opt/homebrew/bin/growth` mais
+`python3 scripts/…` échoue avec `ModuleNotFoundError` :
+
+```bash
+# 1. Désinstaller l'éventuelle install globale Homebrew/pip
+pip3 uninstall growth-system -y 2>/dev/null || true
+brew uninstall growth-system 2>/dev/null || true
+
+# 2. Repartir du venv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+# 3. Confirmer que tout pointe vers le même Python
+which growth          # doit afficher …/.venv/bin/growth
+which python          # doit afficher …/.venv/bin/python
+python -c "import pandas; print('OK')"
+```
 
 ---
 
@@ -72,7 +128,7 @@ Onglet Profil/MAJ  → déposer l'export CSV de l'extension li-posts-export
 Onglet Scoreur     → coller le brouillon → P(queue), verdict, suggestions
 Onglet Bandit      → recommander l'archétype du jour
                    → enregistrer le résultat après publication
-Onglet Monitoring  → graphes audience, alarmes CUSUM
+Onglet Monitoring  → graphes audience, alarmes CUSUM, dashboards décisionnels
 Onglet Leads       → saisir les leads manuellement + lancer le backtest
 ```
 
@@ -249,6 +305,75 @@ pytest tests/ -v          # 130 tests
 | `test_web_api.py` | 31 | Tous les endpoints jalon 1 (health/profile/score/recommend/update) |
 | `test_web_ingest.py` | 39 | Ingest sur fixture réelle, merge, garde-fous, atomicité |
 | `test_web_jalon3.py` | 27 | Monitor / Leads / Backtest |
+| `test_decisional_p1.py` | 19 | Bandit live (posteriors Beta) + couverture leads + table par archétype |
+| `test_decisional_p2.py` | 12 | Fraîcheur corpus : last\_ingest\_at, last\_retrain\_at, changepoint\_unaddressed |
+| `test_decisional_p3.py` | 17 | score\_log.csv, rework\_rate\_30d, bandes CUSUM, precision\_trend |
+
+| `test_leads_attribution.py` | 22 | Attribution leads : parse dates FR, fenêtre, agrégation, endpoints |
+
+```bash
+pytest tests/ -v          # 241 tests
+```
+
+---
+
+## Dashboards décisionnels (onglet Monitoring)
+
+### Bandit live — posteriors Beta
+Courbes Beta en temps réel pour chaque archétype (Thompson Sampling γ = 0.985).  
+Recommandation active mise en évidence. Source : `data/growth_state.json`.
+
+### Couverture leads
+Bannière orange si < 50 % des posts LinkedIn sont rattachés à un lead, verte sinon.  
+Table de répartition leads par archétype.
+
+### Carte de fraîcheur
+Trois KPI : dernière ingestion (`last_ingest.json`), dernier ré-entraînement  
+(`scorer_model.json → trained_at`), dernier changepoint CUSUM.  
+Flag `changepoint_unaddressed` : alerte si un changepoint n'a pas été suivi d'un ré-entraînement.
+
+### Journal de scoring (`score_log.csv`)
+Chaque appel à `/api/score` est journalisé : timestamp, extrait, P(queue), verdict, format.  
+Taux de rework sur 30 jours visible dans la carte Monitoring.
+
+### Bandes d'accélération CUSUM
+Zones colorées sur le graphe de croissance pour chaque phase d'accélération détectée.
+
+### Tendance précision@20% (`precision_log.csv`)
+Courbe historique de la précision@20% du scoreur, mise à jour à chaque ingestion.
+
+---
+
+## Attribution leads LinkedIn → posts (outil de rattrapage ponctuel)
+
+L'onglet **Leads & Backtest** expose une section *Importer des leads depuis un export de connexions*.
+
+### Principe
+
+L'export LinkedIn des connexions contient une date par connexion mais **pas de lien direct vers un post**.  
+Le pipeline infère l'attribution par fenêtre temporelle : pour chaque connexion, on cherche  
+le post le plus engageant dans une fenêtre `[date_connexion − window_days, date_connexion]` (défaut 7 jours).
+
+### Utilisation
+
+1. Exporter les connexions LinkedIn (Données > Obtenir une copie de vos données > Connexions).
+2. Déposer le CSV dans la section dédiée, ajuster la fenêtre et la date de référence.
+3. Cliquer **Analyser** — *aucun fichier n'est modifié à cette étape*.
+4. Vérifier le détail (colonne Fiabilité = "estimée (fenêtre Nj)").
+5. Choisir la stratégie (`add` ou `replace`) puis **Appliquer à leads.csv**.
+
+Un snapshot horodaté est automatiquement créé dans `data/snapshots/` avant toute écriture.
+
+### Limites (§2)
+
+- **Estimation uniquement.** La correspondance connexion → post est une approximation temporelle,  
+  pas une donnée LinkedIn officielle. Toujours vérifier la cohérence avant d'appliquer.
+- **Biais de sélection.** Un post très engageant dans la fenêtre peut capter des leads  
+  qui ne l'ont pas réellement vu.
+- **Dates LinkedIn partielles.** LinkedIn n'expose que le jour de la semaine ou "Aujourd'hui"  
+  pour les connexions récentes ; les dates absolues sont déduites par inférence d'année.
+- **Pas de suppression.** L'outil ajoute ou remplace des entrées dans `leads.csv` mais  
+  ne supprime jamais de lignes existantes.
 
 ---
 

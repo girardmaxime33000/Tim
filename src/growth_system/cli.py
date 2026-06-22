@@ -117,10 +117,16 @@ def serve(
     open: bool = typer.Option(True, "--open/--no-open", help="Open browser automatically"),
 ) -> None:
     """Start the web UI (FastAPI + frontend) and open the browser."""
+    import os
     import threading
     import time
     import webbrowser
     import uvicorn
+    # Forcer le backend non-interactif avant tout import de matplotlib.
+    # Sur macOS le backend par défaut (MacOS) exige le thread principal ;
+    # uvicorn exécute les handlers dans des threads workers → RuntimeError.
+    # La variable d'environnement est la seule garantie qui précède sys.modules.
+    os.environ.setdefault("MPLBACKEND", "agg")
     from growth_system.web.api import app as web_app
 
     url = f"http://{host}:{port}"

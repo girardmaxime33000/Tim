@@ -1,3 +1,4 @@
+.venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -9,5 +10,7 @@ build/
 growth_state.json
 data/snapshots/
 data/leads.csv
+data/bandit_log.csv
 data/backtest_results.png
 data/backtest_posteriors.json
+.claude/

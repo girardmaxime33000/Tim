@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from growth_system.archetypes import ALL_ARMS, ArmId, archetype_of
+from growth_system.leads_attribution import normalize_post_id
 from growth_system.features import has_cta, has_link, hook_type_label, extract_features
 from growth_system.web.ingest import ENG_Q80, IngestError, ingest_to_path, load_raw, normalize
 from growth_system.bandit import DiscountedThompsonBandit
@@ -38,6 +39,7 @@ POSTS_CSV = DATA_DIR / "posts.csv"
 AUDIENCE_CSV = DATA_DIR / "daily_audience.csv"
 STATE_JSON = _REPO_ROOT / "growth_state.json"
 LEADS_CSV = DATA_DIR / "leads.csv"
+BANDIT_LOG_CSV = DATA_DIR / "bandit_log.csv"
 
 # ---------------------------------------------------------------------------
 # Singletons (loaded once at startup)
@@ -155,6 +157,20 @@ class UpdateResponse(BaseModel):
     reward: float
     bandit_updated: bool
     posteriors: dict[str, dict[str, float]]
+    tail_warning: str | None = None  # désaccord déclaré vs corpus
+
+
+class BanditLogEntry(BaseModel):
+    timestamp: str
+    arm: str
+    tail: int
+    leads: int
+    post_id: str | None
+    reward: float
+
+
+class BanditLogResponse(BaseModel):
+    entries: list[BanditLogEntry]
 
 
 # ---------------------------------------------------------------------------
@@ -353,12 +369,41 @@ def recommend() -> RecommendResponse:
 @app.post("/api/update", response_model=UpdateResponse)
 def update(req: UpdateRequest) -> UpdateResponse:
     """Record a post outcome and update the bandit."""
+    import csv as _csv
+    import datetime as _dt
+    import tempfile as _tmp
+    import shutil as _shutil
+
     if req.arm not in ALL_ARMS:
-        from fastapi import HTTPException
         raise HTTPException(status_code=422, detail=f"Unknown arm '{req.arm}'. Valid: {ALL_ARMS}")
 
+    # --- Normaliser post_id ---
+    post_id_canon: str | None = None
+    if req.post_id and req.post_id.strip():
+        post_id_canon = normalize_post_id(req.post_id.strip())
+
+    # --- Validation tail vs corpus (avertissement non bloquant) ---
+    tail_warning: str | None = None
+    if post_id_canon and POSTS_CSV.exists():
+        try:
+            pf = pd.read_csv(POSTS_CSV)
+            # Chercher le post par normalisation de permalink
+            pf["post_id_norm"] = pf["permalink"].astype(str).apply(normalize_post_id)
+            match = pf[pf["post_id_norm"] == post_id_canon]
+            if not match.empty:
+                corpus_in_tail = int(match.iloc[0]["eng_score"] >= ENG_Q80)
+                if corpus_in_tail != req.tail:
+                    declared = "top 20 %" if req.tail == 1 else "hors top 20 %"
+                    actual = "top 20 %" if corpus_in_tail == 1 else "hors top 20 %"
+                    tail_warning = (
+                        f"Désaccord : vous déclarez '{declared}' mais le corpus "
+                        f"indique '{actual}' (eng_score={match.iloc[0]['eng_score']:.1f})."
+                    )
+        except Exception:
+            pass
+
+    # --- Calcul récompense ---
     reward_weights = RewardWeights()
-    # Normalise leads: 3 leads → 1.0 (saturates)
     lead_signal = min(req.leads / 3.0, 1.0)
     reward = float(
         reward_weights.w_tail * req.tail
@@ -366,13 +411,39 @@ def update(req: UpdateRequest) -> UpdateResponse:
     )
     reward = max(0.0, min(1.0, reward))
 
+    # --- Mise à jour bandit ---
     bandit = _get_bandit()
     bandit.update(req.arm, reward)  # type: ignore[arg-type]
     _save_bandit_state()
 
-    # Persist to leads.csv if post_id provided
-    if req.post_id and req.leads > 0:
-        _append_lead(req.post_id, req.leads)
+    # --- Auto-écriture leads.csv si post_id + leads ---
+    if post_id_canon and req.leads > 0:
+        _append_lead(post_id_canon, req.leads)
+
+    # --- Journal bandit_log.csv (atomique) ---
+    _log_cols = ["timestamp", "arm", "tail", "leads", "post_id", "reward"]
+    _log_rows: list[dict] = []
+    if BANDIT_LOG_CSV.exists():
+        try:
+            _log_rows = pd.read_csv(BANDIT_LOG_CSV, dtype={"post_id": str}).to_dict("records")
+        except Exception:
+            pass
+    _log_rows.append({
+        "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
+        "arm": req.arm,
+        "tail": req.tail,
+        "leads": req.leads,
+        "post_id": post_id_canon or "",
+        "reward": round(reward, 4),
+    })
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with _tmp.NamedTemporaryFile(mode="w", dir=DATA_DIR, suffix=".tmp",
+                                 delete=False, newline="") as _tf:
+        _w = _csv.DictWriter(_tf, fieldnames=_log_cols)
+        _w.writeheader()
+        _w.writerows(_log_rows)
+        _tf_path = _tf.name
+    _shutil.move(_tf_path, str(BANDIT_LOG_CSV))
 
     post = bandit.posterior()
     posteriors = {
@@ -383,13 +454,42 @@ def update(req: UpdateRequest) -> UpdateResponse:
         }
         for a, ab in post.items()
     }
-    return UpdateResponse(reward=round(reward, 4), bandit_updated=True, posteriors=posteriors)
+    return UpdateResponse(
+        reward=round(reward, 4),
+        bandit_updated=True,
+        posteriors=posteriors,
+        tail_warning=tail_warning,
+    )
 
 
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
+ANALYTICS_DIR = DATA_DIR / "raw" / "analytics"
 LAST_INGEST_JSON = DATA_DIR / "last_ingest.json"
 SCORE_LOG_CSV = DATA_DIR / "score_log.csv"
 PRECISION_LOG_CSV = DATA_DIR / "precision_log.csv"
+
+
+@app.get("/api/bandit/log", response_model=BanditLogResponse)
+def get_bandit_log(limit: int = 20) -> BanditLogResponse:
+    """Retourne les N dernières mises à jour bandit (audit trail)."""
+    if not BANDIT_LOG_CSV.exists():
+        return BanditLogResponse(entries=[])
+    try:
+        df = pd.read_csv(BANDIT_LOG_CSV, dtype={"post_id": str})
+        entries = [
+            BanditLogEntry(
+                timestamp=str(r.get("timestamp", "")),
+                arm=str(r.get("arm", "")),
+                tail=int(r.get("tail", 0)),
+                leads=int(r.get("leads", 0)),
+                post_id=str(r.get("post_id", "")) or None,
+                reward=float(r.get("reward", 0)),
+            )
+            for r in df.tail(limit).to_dict("records")
+        ]
+        return BanditLogResponse(entries=list(reversed(entries)))
+    except Exception:
+        return BanditLogResponse(entries=[])
 
 
 class IngestResponse(BaseModel):
@@ -588,7 +688,7 @@ def monitor() -> MonitorResponse:
         leads_map: dict[str, int] = {}  # post_id (= permalink) -> qualified_contacts
         if LEADS_CSV.exists() and LEADS_CSV.stat().st_size > 0:
             try:
-                lf = pd.read_csv(LEADS_CSV)
+                lf = pd.read_csv(LEADS_CSV, dtype={"post_id": str})
                 for _, lr in lf.iterrows():
                     leads_map[str(lr["post_id"])] = int(lr.get("qualified_contacts", 0))
             except Exception:
@@ -711,7 +811,7 @@ def get_leads() -> LeadsResponse:
     """Return all manually-entered leads."""
     if not LEADS_CSV.exists():
         return LeadsResponse(leads=[], total_leads=0)
-    df = pd.read_csv(LEADS_CSV)
+    df = pd.read_csv(LEADS_CSV, dtype={"post_id": str})
     items = [
         LeadItem(post_id=str(r["post_id"]), qualified_contacts=int(r["qualified_contacts"]))
         for _, r in df.iterrows()
@@ -722,9 +822,10 @@ def get_leads() -> LeadsResponse:
 @app.post("/api/leads", response_model=LeadUpsertResponse)
 def upsert_lead(req: LeadItem) -> LeadUpsertResponse:
     """Add or update a lead entry (upsert by post_id)."""
+    req.post_id = normalize_post_id(req.post_id)
     rows: list[dict[str, Any]] = []
     if LEADS_CSV.exists():
-        rows = pd.read_csv(LEADS_CSV).to_dict("records")
+        rows = pd.read_csv(LEADS_CSV, dtype={"post_id": str}).to_dict("records")
     action = "created"
     found = False
     for row in rows:
@@ -778,9 +879,15 @@ def run_backtest_endpoint() -> BacktestResponse:
     if not MODEL_PATH.exists():
         raise HTTPException(status_code=404, detail="scorer_model.json introuvable.")
 
-    leads_empty = not LEADS_CSV.exists() or pd.read_csv(LEADS_CSV).empty if LEADS_CSV.exists() else True
+    leads_empty = not LEADS_CSV.exists() or pd.read_csv(LEADS_CSV, dtype={"post_id": str}).empty if LEADS_CSV.exists() else True
 
     plot_path = str(DATA_DIR / "backtest_results.png")
+
+    # Force le backend non-interactif AVANT tout import de matplotlib.pyplot.
+    # Sur macOS, le backend par défaut (MacOS) exige le thread principal ;
+    # FastAPI appelle ce handler dans un thread worker → RuntimeError sans ce fix.
+    import matplotlib
+    matplotlib.use("agg")
 
     from growth_system.backtest import run_backtest, REFERENCE_DATE
     from datetime import timedelta
@@ -981,9 +1088,9 @@ def get_posts(
 
 @app.get("/api/monitor/figures")
 def monitor_figures() -> dict:  # type: ignore[type-arg]
-    """Return 4 Plotly figures as JSON for the Monitoring tab."""
+    """Return Plotly figures as JSON for the Monitoring tab."""
     import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
+    import numpy as _np
 
     figures: dict[str, str] = {}
 
@@ -993,71 +1100,76 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
         df = df.sort_values("date").reset_index(drop=True)
         smooth = df["new_followers"].rolling(14, min_periods=1).mean()
 
-        # Rerun CUSUM to get alarms for annotation
+        calib = smooth.iloc[:60]
+        mu0 = float(calib.mean())
+        sigma = max(float(calib.std()), 1e-3)
         from growth_system.changepoint import CusumDetector as _CD
-        _det = _CD(mu0=float(smooth.iloc[:60].mean()),
-                   k=0.5 * max(float(smooth.iloc[:60].std()), 1e-3),
-                   h=4.5 * max(float(smooth.iloc[:60].std()), 1e-3))
+        _det = _CD(mu0=mu0, k=0.5 * sigma, h=4.5 * sigma)
         alarms = []
         for _, row in df.iterrows():
             cp = _det.update(float(smooth[row.name]), row["date"].date())
             if cp:
                 alarms.append(cp)
 
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(go.Scatter(
-            x=df["date"], y=smooth.round(2),
-            name="Abonnés/j (lissé 14j)", line={"color": "#E8540A", "width": 2},
-        ), secondary_y=False)
-        fig.add_trace(go.Scatter(
-            x=df["date"], y=df["impressions"],
-            name="Impressions/j", line={"color": "#4A90D9", "width": 1},
-            opacity=0.6,
-        ), secondary_y=True)
-        # Bandes de fond pour phases d'accélération (ruptures "up")
-        last_dates = df["date"].dt.date.tolist()
-        series_end = last_dates[-1] if last_dates else None
-        up_alarms = [cp for cp in alarms if cp.direction == "up"]
-        for i, cp in enumerate(up_alarms):
-            # Phase end = next alarm of any direction, or end of series
-            next_alarms = [c for c in alarms if c.detected_date > cp.detected_date]
-            phase_end = next_alarms[0].detected_date if next_alarms else series_end
-            if phase_end and phase_end > cp.detected_date:
-                fig.add_vrect(
-                    x0=str(cp.detected_date), x1=str(phase_end),
-                    fillcolor="rgba(76,175,80,0.08)", line_width=0,
-                    annotation_text=f"Accélération {cp.detected_date}",
-                    annotation_font_color="#4CAF50",
-                    annotation_font_size=10,
-                )
+        # Build shapes as dicts (avoids slow add_vline / add_vrect calls)
+        shapes = []
+        annotations = []
+        last_date = str(df["date"].dt.date.tolist()[-1]) if len(df) else None
         for cp in alarms:
-            fig.add_vline(x=str(cp.detected_date), line_dash="dot",
-                          line_color="orange", annotation_text=f"CUSUM {cp.direction}",
-                          annotation_font_color="orange")
+            if cp.direction == "up":
+                next_cp = next((c for c in alarms if c.detected_date > cp.detected_date), None)
+                x1 = str(next_cp.detected_date) if next_cp else last_date
+                if x1:
+                    shapes.append(dict(type="rect", x0=str(cp.detected_date), x1=x1,
+                                       y0=0, y1=1, xref="x", yref="paper",
+                                       fillcolor="rgba(76,175,80,0.08)", line_width=0))
+                    annotations.append(dict(x=str(cp.detected_date), y=0.98, xref="x", yref="paper",
+                                            text=f"Accél. {cp.detected_date}", showarrow=False,
+                                            font=dict(color="#4CAF50", size=10), xanchor="left"))
+            shapes.append(dict(type="line", x0=str(cp.detected_date), x1=str(cp.detected_date),
+                               y0=0, y1=1, xref="x", yref="paper",
+                               line=dict(color="orange", dash="dot", width=1)))
+            annotations.append(dict(x=str(cp.detected_date), y=0.88, xref="x", yref="paper",
+                                    text=f"CUSUM {cp.direction}", showarrow=False,
+                                    font=dict(color="orange", size=10), xanchor="left"))
+
+        # Two y-axes via layout (avoids make_subplots overhead)
+        imp_max = float(df["impressions"].max()) or 1.0
+        smooth_max = float(smooth.max()) or 1.0
+        imp_scaled = (df["impressions"] / imp_max * smooth_max).tolist()
+
+        fig = go.Figure(data=[
+            go.Scatter(x=df["date"].tolist(), y=smooth.round(2).tolist(),
+                       name="Abonnés/j (lissé 14j)", line={"color": "#E8540A", "width": 2}),
+            go.Scatter(x=df["date"].tolist(), y=imp_scaled,
+                       name="Impressions/j (éch. droite)", line={"color": "#4A90D9", "width": 1},
+                       opacity=0.6),
+        ])
         fig.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
             title="Dynamique d'audience", legend={"orientation": "h"},
             margin={"t": 50, "b": 40},
+            shapes=shapes, annotations=annotations,
         )
-        fig.update_yaxes(title_text="Abonnés/j", secondary_y=False)
-        fig.update_yaxes(title_text="Impressions", secondary_y=True)
         figures["growth"] = fig.to_json()
 
     # ── Figure 2: distribution eng_score ─────────────────────────────────────
     if POSTS_CSV.exists():
         df_p = pd.read_csv(POSTS_CSV)
-        fig2 = go.Figure()
-        fig2.add_trace(go.Histogram(
-            x=df_p["eng_score"], nbinsx=30,
+        fig2 = go.Figure(data=[go.Histogram(
+            x=df_p["eng_score"].tolist(), nbinsx=30,
             marker_color="#E8540A", opacity=0.8, name="Eng. Score",
-        ))
-        fig2.add_vline(x=ENG_Q80, line_dash="dash", line_color="white",
-                       annotation_text=f"q80 = {ENG_Q80}", annotation_font_color="white")
+        )])
         fig2.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
             title="Distribution de l'engagement (eng_score)",
             xaxis_title="Eng. Score", yaxis_title="Nombre de posts",
             margin={"t": 50, "b": 40},
+            shapes=[dict(type="line", x0=ENG_Q80, x1=ENG_Q80, y0=0, y1=1,
+                         xref="x", yref="paper", line=dict(color="white", dash="dash"))],
+            annotations=[dict(x=ENG_Q80, y=1, xref="x", yref="paper",
+                              text=f"q80={ENG_Q80}", showarrow=False,
+                              font=dict(color="white", size=10))],
         )
         figures["distribution"] = fig2.to_json()
 
@@ -1066,11 +1178,12 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
     if backtest_series_path.exists():
         with open(backtest_series_path) as f:
             bt = json.load(f)
-        fig3 = go.Figure()
         dates_bt = bt.get("dates", [])
-        for arm in ALL_ARMS:
-            vals = [p.get(arm, 0) for p in bt.get("posteriors", [])]
-            fig3.add_trace(go.Scatter(x=dates_bt, y=vals, name=arm, mode="lines"))
+        fig3 = go.Figure(data=[
+            go.Scatter(x=dates_bt, y=[p.get(arm, 0) for p in bt.get("posteriors", [])],
+                       name=arm, mode="lines")
+            for arm in ALL_ARMS
+        ])
         fig3.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
             title="Évolution des posteriors par archétype (dernier backtest)",
@@ -1078,7 +1191,6 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
         )
         figures["bandit"] = fig3.to_json()
     else:
-        # Placeholder empty figure
         fig3 = go.Figure()
         fig3.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
@@ -1094,40 +1206,39 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
         calib = smooth.iloc[:60]
         mu0 = float(calib.mean())
         sigma = max(float(calib.std()), 1e-3)
-        from growth_system.changepoint import CusumDetector as _CD2
-        det2 = _CD2(mu0=mu0, k=0.5 * sigma, h=4.5 * sigma)
-        s_plus_vals, s_minus_vals, alarm_dates = [], [], []
-        for _, row in df.iterrows():
-            det2._s_plus = max(0.0, det2._s_plus + (float(smooth[row.name]) - mu0 - det2.k))
-            det2._s_minus = max(0.0, det2._s_minus - (float(smooth[row.name]) - mu0 - det2.k))
-            s_plus_vals.append(round(det2._s_plus, 3))
-            s_minus_vals.append(round(det2._s_minus, 3))
-            if det2._s_plus >= det2.h or det2._s_minus >= det2.h:
-                alarm_dates.append(str(row["date"].date()))
-                det2._s_plus = 0.0
-                det2._s_minus = 0.0
+        k = 0.5 * sigma
+        h = 4.5 * sigma
+        sp, sm = 0.0, 0.0
+        sp_vals, sm_vals = [], []
+        for v in smooth:
+            sp = max(0.0, sp + (float(v) - mu0 - k))
+            sm = max(0.0, sm - (float(v) - mu0 - k))
+            sp_vals.append(round(sp, 3))
+            sm_vals.append(round(sm, 3))
+            if sp >= h or sm >= h:
+                sp = sm = 0.0
 
-        fig4 = go.Figure()
-        fig4.add_trace(go.Scatter(x=df["date"], y=s_plus_vals,
-                                   name="S+ (hausse)", line={"color": "#E8540A"}))
-        fig4.add_trace(go.Scatter(x=df["date"], y=s_minus_vals,
-                                   name="S− (baisse)", line={"color": "#4A90D9"}))
-        fig4.add_hline(y=det2.h, line_dash="dash", line_color="white",
-                       annotation_text=f"h = {det2.h:.2f}", annotation_font_color="white")
+        dates_list = df["date"].tolist()
+        fig4 = go.Figure(data=[
+            go.Scatter(x=dates_list, y=sp_vals, name="S+ (hausse)", line={"color": "#E8540A"}),
+            go.Scatter(x=dates_list, y=sm_vals, name="S− (baisse)", line={"color": "#4A90D9"}),
+        ])
         fig4.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
             title="Statistiques CUSUM (S+, S−)", yaxis_title="Statistique",
             margin={"t": 50, "b": 40},
+            shapes=[dict(type="line", x0=dates_list[0], x1=dates_list[-1], y0=h, y1=h,
+                         xref="x", yref="y", line=dict(color="white", dash="dash"))],
+            annotations=[dict(x=dates_list[-1], y=h, text=f"h={h:.1f}", showarrow=False,
+                              font=dict(color="white", size=10))],
         )
         figures["cusum"] = fig4.to_json()
 
-    # ── Figure 5: bandit posteriors EN DIRECT (état actuel de growth_state.json)
-    from scipy.stats import beta as _beta_dist
-    import numpy as _np
+    # ── Figure 5: bandit posteriors EN DIRECT ────────────────────────────────
+    import numpy as _np2
 
     bandit_live = _get_bandit()
     live_post = bandit_live.posterior()
-    # Best arm by expected theta (deterministic — argmax, not sampled)
     best_live = max(ALL_ARMS, key=lambda a: live_post[a][0] / (live_post[a][0] + live_post[a][1]))
 
     ts = "jamais"
@@ -1135,23 +1246,28 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
         import datetime as _dt
         ts = _dt.datetime.fromtimestamp(STATE_JSON.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
 
-    _x = [i / 199 for i in range(200)]
+    _x = _np2.linspace(0, 1, 200)
     _COLORS = {"contrarian": "#E8540A", "data": "#4A90D9",
                "question": "#4CAF50", "statement": "#FF9800"}
-    fig_live = go.Figure()
-    for arm in ALL_ARMS:
-        alpha_v, beta_v = live_post[arm]
-        try:
-            x_arr = _np.linspace(0, 1, 200)
-            y_arr = _beta_dist.pdf(x_arr, alpha_v, beta_v).tolist()
-        except Exception:
-            y_arr = [0.0] * 200
-        fig_live.add_trace(go.Scatter(
-            x=_x, y=y_arr,
+
+    def _beta_pdf(x: "_np2.ndarray", a: float, b: float) -> "_np2.ndarray":  # type: ignore[name-defined]
+        """Fast Beta PDF via numpy log-space (avoids scipy import)."""
+        from math import lgamma
+        log_norm = lgamma(a + b) - lgamma(a) - lgamma(b)
+        log_p = (a - 1) * _np2.log(_np2.maximum(x, 1e-300)) + \
+                (b - 1) * _np2.log(_np2.maximum(1 - x, 1e-300)) + log_norm
+        return _np2.exp(log_p)
+
+    fig_live = go.Figure(data=[
+        go.Scatter(
+            x=_x.tolist(),
+            y=_beta_pdf(_x, live_post[arm][0], live_post[arm][1]).tolist(),
             name=arm + (" ← recommandé" if arm == best_live else ""),
             line={"color": _COLORS.get(arm, "#888"),
                   "width": 3 if arm == best_live else 1.5},
-        ))
+        )
+        for arm in ALL_ARMS
+    ])
     fig_live.update_layout(
         template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
         title=f"Posteriors bandit EN DIRECT — Dernière MàJ : {ts}",
@@ -1189,12 +1305,329 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
     return figures
 
 
+# ---------------------------------------------------------------------------
+# Endpoints — Attribution leads LinkedIn → posts
+# ---------------------------------------------------------------------------
+
+
+class ProposedLeadRow(BaseModel):
+    post_id: str
+    qualified_contacts: float
+    raw_count: int
+    weighted_count: float
+
+
+class UnattributedItem(BaseModel):
+    nom: str
+    raison: str
+
+
+class AttributeDetailItem(BaseModel):
+    nom: str
+    titre: str
+    date_brute: str
+    date_parsee: str | None
+    fiabilite_date_post: str | None = None  # "exacte (MEILLEURS POSTS)" | "approximative (reconstruite)"
+    motivation: str
+    type_lead: str
+    poids: float
+    post_id_attribue: str | None
+    date_post_attribue: str | None
+    eng_score_post: float | None
+    fiabilite: str
+
+
+class AttributeResponse(BaseModel):
+    n_leads_total: int
+    n_leads_parsed_date: int
+    n_leads_attributed: int
+    n_leads_unattributed: int
+    unattributed: list[UnattributedItem]
+    proposed_leads_csv: list[ProposedLeadRow]
+    detail: list[AttributeDetailItem]
+    estimation: bool
+
+
+class ApplyLeadsRequest(BaseModel):
+    proposed_leads_csv: list[ProposedLeadRow]
+    merge_strategy: str = "add"  # "add" | "replace"
+
+
+class ApplyLeadsResponse(BaseModel):
+    applied: int
+    snapshot: str
+
+
+@app.post("/api/leads/attribute", response_model=AttributeResponse)
+async def attribute_leads(
+    file: UploadFile = File(...),
+    window_days: int = Form(default=7),
+    reference_date: str | None = Form(default=None),
+    type_weights: str | None = Form(default=None),
+) -> AttributeResponse:
+    """Attribue des leads (export CSV connexions LinkedIn) aux posts, par inférence temporelle.
+
+    NE MODIFIE JAMAIS leads.csv sur disque.
+    """
+    import io as _io
+    from datetime import date as _date
+    from growth_system.leads_attribution import (
+        parse_lead_date,
+        attribute_lead_to_post,
+        aggregate_attribution,
+    )
+    from growth_system.config import DEFAULT_TYPE_WEIGHTS, DEFAULT_ATTRIBUTION_WEIGHT_FALLBACK
+
+    # --- Reference date ---
+    if reference_date:
+        ref_date = _date.fromisoformat(reference_date)
+    else:
+        ref_date = _date.today()
+
+    # --- Type weights ---
+    tw: dict[str, float] = dict(DEFAULT_TYPE_WEIGHTS)
+    if type_weights:
+        try:
+            tw.update(json.loads(type_weights))
+        except Exception:
+            pass
+
+    # --- Read uploaded CSV ---
+    content = await file.read()
+    try:
+        leads_df = pd.read_csv(_io.BytesIO(content))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Impossible de lire le CSV : {exc}")
+
+    # --- Detect columns (flexible) ---
+    col_map: dict[str, str] = {}
+    for col in leads_df.columns:
+        cl = col.lower().strip()
+        if cl in ("nom_prenom", "nom", "name", "prénom et nom", "prenom"):
+            col_map.setdefault("nom_prenom", col)
+        elif cl in ("titre", "title", "poste", "fonction"):
+            col_map.setdefault("titre", col)
+        elif cl in ("date_connexion", "date", "connected on", "date de connexion"):
+            col_map.setdefault("date_connexion", col)
+        elif cl in ("motivation", "note", "notes"):
+            col_map.setdefault("motivation", col)
+        elif cl in ("type_lead", "type", "catégorie", "categorie"):
+            col_map.setdefault("type_lead", col)
+
+    def _get(row: "pd.Series", key: str, default: str = "") -> str:
+        col = col_map.get(key)
+        if col and col in row.index:
+            v = row[col]
+            return str(v) if pd.notna(v) else default
+        return default
+
+    # --- Load posts ---
+    posts_for_attr: pd.DataFrame = pd.DataFrame(
+        columns=["post_id", "post_date", "eng_score"]
+    )
+    exact_post_ids: set[str] = set()
+    if POSTS_CSV.exists():
+        try:
+            pf = pd.read_csv(POSTS_CSV)
+            import datetime as _dt
+            ingest_ref = _date.today()
+            try:
+                from growth_system.web.api import _INGEST_REF_DATE as _iref
+                ingest_ref = _iref
+            except Exception:
+                pass
+            pf["post_date"] = pf["days_ago"].apply(
+                lambda d: ingest_ref - _dt.timedelta(days=int(d)) if pd.notna(d) else None
+            )
+            pf = pf.dropna(subset=["post_date"])
+            posts_for_attr = pf[["permalink", "post_date", "eng_score"]].copy()
+            posts_for_attr = posts_for_attr.rename(columns={"permalink": "post_id"})
+            posts_for_attr["post_id"] = posts_for_attr["post_id"].apply(normalize_post_id)
+
+            # Enrichissement avec dates exactes (AggregateAnalytics MEILLEURS POSTS)
+            from growth_system.leads_attribution import load_analytics_post_dates
+            analytics_dates = load_analytics_post_dates(ANALYTICS_DIR)
+            # Normaliser les clés du dict analytics
+            analytics_dates = {normalize_post_id(k): v for k, v in analytics_dates.items()}
+            if analytics_dates:
+                for idx, post_row in posts_for_attr.iterrows():
+                    pid = str(post_row["post_id"])
+                    if pid in analytics_dates:
+                        posts_for_attr.at[idx, "post_date"] = analytics_dates[pid]
+                        exact_post_ids.add(pid)
+        except Exception:
+            pass
+
+    # --- Process each lead ---
+    detail_rows: list[AttributeDetailItem] = []
+    unattributed: list[UnattributedItem] = []
+    attribution_records: list[dict] = []
+
+    n_parsed = 0
+    n_attributed = 0
+
+    for _, row in leads_df.iterrows():
+        nom = _get(row, "nom_prenom", "Inconnu")
+        titre = _get(row, "titre")
+        date_brute = _get(row, "date_connexion")
+        motivation = _get(row, "motivation")
+        type_lead = _get(row, "type_lead", "À vérifier")
+
+        poids = tw.get(type_lead, DEFAULT_ATTRIBUTION_WEIGHT_FALLBACK)
+
+        # Parse date
+        parsed_date = parse_lead_date(date_brute, ref_date)
+        if parsed_date is None:
+            unattributed.append(UnattributedItem(nom=nom, raison="date non résolue"))
+            detail_rows.append(AttributeDetailItem(
+                nom=nom, titre=titre, date_brute=date_brute, date_parsee=None,
+                motivation=motivation, type_lead=type_lead, poids=poids,
+                post_id_attribue=None, date_post_attribue=None, eng_score_post=None,
+                fiabilite="date non résolue",
+                fiabilite_date_post=None,
+            ))
+            continue
+
+        n_parsed += 1
+
+        # Attribute to post
+        attr = attribute_lead_to_post(parsed_date, posts_for_attr, window_days=window_days)
+        if attr is None:
+            unattributed.append(UnattributedItem(nom=nom, raison="hors fenêtre"))
+            detail_rows.append(AttributeDetailItem(
+                nom=nom, titre=titre, date_brute=date_brute,
+                date_parsee=str(parsed_date),
+                motivation=motivation, type_lead=type_lead, poids=poids,
+                post_id_attribue=None, date_post_attribue=None, eng_score_post=None,
+                fiabilite="hors fenêtre",
+                fiabilite_date_post=None,
+            ))
+            continue
+
+        n_attributed += 1
+        fiab = f"estimée (fenêtre {window_days}j)"
+        fdp = (
+            "exacte (MEILLEURS POSTS)"
+            if attr.post_id in exact_post_ids
+            else "approximative (reconstruite)"
+        )
+        detail_rows.append(AttributeDetailItem(
+            nom=nom, titre=titre, date_brute=date_brute,
+            date_parsee=str(parsed_date),
+            motivation=motivation, type_lead=type_lead, poids=poids,
+            post_id_attribue=attr.post_id,
+            date_post_attribue=str(attr.post_date),
+            eng_score_post=attr.eng_score,
+            fiabilite=fiab,
+            fiabilite_date_post=fdp,
+        ))
+        attribution_records.append({
+            "post_id_attribue": attr.post_id,
+            "poids": poids,
+            "nom_prenom": nom,
+            "type_lead": type_lead,
+        })
+
+    # --- Aggregate ---
+    proposed: list[ProposedLeadRow] = []
+    if attribution_records:
+        attr_df = pd.DataFrame(attribution_records)
+        agg = aggregate_attribution(attr_df)
+        for _, agg_row in agg.iterrows():
+            proposed.append(ProposedLeadRow(
+                post_id=str(agg_row["post_id_attribue"]),
+                qualified_contacts=float(agg_row["weighted_count"]),
+                raw_count=int(agg_row["raw_count"]),
+                weighted_count=float(agg_row["weighted_count"]),
+            ))
+
+    n_total = len(leads_df)
+    return AttributeResponse(
+        n_leads_total=n_total,
+        n_leads_parsed_date=n_parsed,
+        n_leads_attributed=n_attributed,
+        n_leads_unattributed=n_total - n_attributed,
+        unattributed=unattributed,
+        proposed_leads_csv=proposed,
+        detail=detail_rows,
+        estimation=True,
+    )
+
+
+@app.post("/api/leads/attribute/apply", response_model=ApplyLeadsResponse)
+def apply_leads(req: ApplyLeadsRequest) -> ApplyLeadsResponse:
+    """Applique les leads proposés dans leads.csv de façon atomique.
+
+    Crée un snapshot horodaté dans data/snapshots/ AVANT l'écriture.
+    merge_strategy :
+      - "add"     : ajoute les qualified_contacts aux valeurs existantes
+      - "replace" : écrase les valeurs existantes
+    """
+    import tempfile
+    import shutil
+    import datetime as _dt
+
+    # --- Snapshot AVANT écriture ---
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    snapshot_path = SNAPSHOT_DIR / f"leads_{ts}.csv"
+
+    existing_rows: list[dict[str, Any]] = []
+    if LEADS_CSV.exists():
+        try:
+            existing_rows = pd.read_csv(LEADS_CSV, dtype={"post_id": str}).to_dict("records")
+        except Exception:
+            pass
+
+    # Écrire snapshot (même si vide)
+    snap_df = pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame(
+        columns=["post_id", "qualified_contacts"]
+    )
+    snap_df.to_csv(snapshot_path, index=False)
+
+    # --- Merge ---
+    # Construire un dict existant : post_id (canonique, str) → qualified_contacts
+    # On passe par normalize_post_id pour corriger d'éventuels IDs déjà stockés en
+    # notation scientifique (ex: "7.449e+18") issus d'une ancienne lecture sans dtype=str.
+    existing_map: dict[str, float] = {
+        normalize_post_id(str(r.get("post_id", ""))): float(r.get("qualified_contacts", 0))
+        for r in existing_rows
+    }
+
+    for item in req.proposed_leads_csv:
+        pid = normalize_post_id(item.post_id)
+        if req.merge_strategy == "add":
+            existing_map[pid] = existing_map.get(pid, 0.0) + item.qualified_contacts
+        else:  # "replace"
+            existing_map[pid] = item.qualified_contacts
+
+    # --- Écriture atomique ---
+    merged_rows = [
+        {"post_id": k, "qualified_contacts": v}
+        for k, v in existing_map.items()
+    ]
+    out_df = pd.DataFrame(merged_rows)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=DATA_DIR, suffix=".tmp", delete=False, newline=""
+    ) as tmp:
+        out_df.to_csv(tmp, index=False)
+        tmp_path = tmp.name
+    shutil.move(tmp_path, str(LEADS_CSV))
+
+    return ApplyLeadsResponse(
+        applied=len(req.proposed_leads_csv),
+        snapshot=str(snapshot_path.name),
+    )
+
+
 def _append_lead(post_id: str, leads: int) -> None:
     """Atomically append a lead entry to leads.csv."""
     import tempfile, shutil
+    post_id = normalize_post_id(post_id)
     rows: list[dict[str, Any]] = []
     if LEADS_CSV.exists():
-        rows = pd.read_csv(LEADS_CSV).to_dict("records")
+        rows = pd.read_csv(LEADS_CSV, dtype={"post_id": str}).to_dict("records")
     # upsert
     found = False
     for row in rows:
