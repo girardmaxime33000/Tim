@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Growth System — OS de croissance</title>
+<style>
+:root {
+  --bg: #1a1a1a;
+  --bg2: #252525;
+  --bg3: #2e2e2e;
+  --border: #3a3a3a;
+  --orange: #e8540a;
+  --orange-dim: #b84008;
+  --text: #e0e0e0;
+  --text-dim: #888;
+  --green: #4caf50;
+  --amber: #ff9800;
+  --red: #f44336;
+  --font: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
+
+/* ─── Layout ─── */
+header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 16px; }
+header h1 { color: var(--orange); font-size: 16px; letter-spacing: .04em; }
+header span { color: var(--text-dim); font-size: 11px; }
+#health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); margin-left: auto; }
+#health-dot.ok { background: var(--green); }
+#health-dot.degraded { background: var(--amber); }
+
+nav { background: var(--bg2); border-bottom: 1px solid var(--border); display: flex; }
+nav button { background: none; border: none; color: var(--text-dim); padding: 10px 18px; cursor: pointer; font: inherit; font-size: 12px; border-bottom: 2px solid transparent; transition: .15s; }
+nav button:hover { color: var(--text); }
+nav button.active { color: var(--orange); border-bottom-color: var(--orange); }
+
+main { padding: 20px; max-width: 1100px; }
+.tab { display: none; }
+.tab.active { display: block; }
+
+/* ─── Components ─── */
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+.card h2 { font-size: 12px; color: var(--orange); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; }
+.card h3 { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+
+label { display: block; color: var(--text-dim); margin-bottom: 4px; font-size: 11px; }
+input[type=text], input[type=number], textarea, select {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  padding: 7px 10px; border-radius: 4px; font: inherit; font-size: 12px;
+}
+textarea { resize: vertical; min-height: 140px; }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--orange); }
+
+button.primary { background: var(--orange); color: #fff; border: none; padding: 8px 18px; border-radius: 4px; cursor: pointer; font: inherit; font-size: 12px; font-weight: bold; transition: .15s; }
+button.primary:hover { background: var(--orange-dim); }
+button.primary:disabled { background: var(--bg3); color: var(--text-dim); cursor: not-allowed; }
+button.secondary { background: var(--bg3); color: var(--text); border: 1px solid var(--border); padding: 7px 14px; border-radius: 4px; cursor: pointer; font: inherit; font-size: 12px; }
+button.secondary:hover { border-color: var(--orange); color: var(--orange); }
+
+.row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.col { flex: 1; min-width: 200px; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
+.badge.green { background: #1b3a1e; color: var(--green); }
+.badge.amber { background: #3a2a00; color: var(--amber); }
+.badge.red { background: #3a1010; color: var(--red); }
+
+.msg { padding: 8px 12px; border-radius: 4px; font-size: 11px; margin-top: 8px; }
+.msg.ok { background: #1b3a1e; color: var(--green); border-left: 3px solid var(--green); }
+.msg.warn { background: #3a2a00; color: var(--amber); border-left: 3px solid var(--amber); }
+.msg.err { background: #3a1010; color: var(--red); border-left: 3px solid var(--red); }
+
+table { width: 100%; border-collapse: collapse; font-size: 11px; }
+th { text-align: left; color: var(--text-dim); border-bottom: 1px solid var(--border); padding: 6px 8px; font-weight: normal; }
+td { padding: 6px 8px; border-bottom: 1px solid #2a2a2a; }
+tr:hover td { background: var(--bg3); }
+
+/* ─── Gauge ─── */
+.gauge-wrap { margin: 8px 0; }
+.gauge-track { height: 10px; background: var(--bg3); border-radius: 5px; overflow: hidden; }
+.gauge-fill { height: 100%; border-radius: 5px; transition: width .4s; }
+.gauge-label { font-size: 22px; font-weight: bold; margin: 6px 0 2px; }
+
+/* ─── Drop zone ─── */
+#drop-zone {
+  border: 2px dashed var(--border); border-radius: 6px; padding: 32px;
+  text-align: center; color: var(--text-dim); cursor: pointer; transition: .2s;
+}
+#drop-zone.over { border-color: var(--orange); color: var(--orange); }
+#drop-zone:hover { border-color: var(--text-dim); }
+
+/* ─── Charts (canvas) ─── */
+canvas { display: block; width: 100% !important; height: 220px !important; }
+
+/* ─── Plotly containers ─── */
+.plotly-chart { width: 100%; height: 280px; }
+
+/* ─── Posts table ─── */
+.posts-table th { cursor: pointer; user-select: none; white-space: nowrap; }
+.posts-table th:hover { color: var(--orange); }
+.posts-table th.sort-asc::after { content: ' ▲'; color: var(--orange); }
+.posts-table th.sort-desc::after { content: ' ▼'; color: var(--orange); }
+.posts-table td { vertical-align: top; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.posts-table td.score-high { color: var(--orange); font-weight: bold; }
+.posts-table td.score-mid { color: var(--amber); }
+.tag { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; margin: 1px; }
+.tag.contrarian { background: #3a1800; color: #e8540a; }
+.tag.question   { background: #1a2e00; color: #8bc34a; }
+.tag.data       { background: #00203a; color: #4fc3f7; }
+.tag.statement  { background: #252525; color: #888; }
+.tag.image      { background: #1e1e3a; color: #9575cd; }
+.tag.video      { background: #1a3a1a; color: #4caf50; }
+.tag.cta-yes    { background: #3a2800; color: #ffb300; }
+.bool-yes { color: var(--green); }
+.bool-no  { color: var(--text-dim); }
+
+/* ─── Spinner ─── */
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--orange); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-left: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── Contributions ─── */
+.contrib-bar { height: 6px; border-radius: 3px; display: inline-block; min-width: 2px; }
+</style>
+<script src="/vendor/plotly.min.js"></script>
+</head>
+<body>
+
+<header>
+  <h1>&#9652; Growth System</h1>
+  <span>OS de croissance LinkedIn</span>
+  <div id="health-dot" title="API status"></div>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('profil')">Profil / MAJ</button>
+  <button onclick="showTab('scoreur')">Scoreur</button>
+  <button onclick="showTab('bandit')">Bandit</button>
+  <button onclick="showTab('monitor')">Monitoring</button>
+  <button onclick="showTab('leads')">Leads &amp; Backtest</button>
+</nav>
+
+<main>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- ONGLET 1 — Profil / MAJ                                               -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div id="tab-profil" class="tab active">
+
+  <div class="card">
+    <h2>Mise à jour du profil</h2>
+    <div class="row" style="margin-bottom:12px">
+      <div class="col">
+        <label>URL du profil LinkedIn</label>
+        <input id="profile-url" type="text" value="https://www.linkedin.com/in/timothee-roy/">
+      </div>
+      <div style="display:flex;align-items:flex-end;gap:8px">
+        <button class="secondary" onclick="openProfile()">Ouvrir profil + extension ↗</button>
+      </div>
+    </div>
+    <div style="color:var(--text-dim);font-size:11px;margin-bottom:14px;line-height:1.7">
+      <b style="color:var(--text)">3 étapes :</b><br>
+      1. Cliquer sur « Ouvrir profil + extension » — le profil LinkedIn s'ouvre dans un nouvel onglet.<br>
+      2. Cliquer sur l'extension <b>li-posts-export</b> dans Chrome et lancer l'export <b>CSV</b> (format le plus fiable).<br>
+      3. Déposer le fichier exporté ci-dessous.
+    </div>
+
+    <div id="drop-zone" onclick="document.getElementById('file-input').click()"
+         ondragover="event.preventDefault();this.classList.add('over')"
+         ondragleave="this.classList.remove('over')"
+         ondrop="handleDrop(event)">
+      <div style="font-size:24px;margin-bottom:8px">&#8659;</div>
+      Glisser le fichier ici, ou cliquer pour sélectionner<br>
+      <span style="font-size:10px">CSV · JSON · XLSX</span>
+    </div>
+    <input id="file-input" type="file" accept=".csv,.json,.xlsx" style="display:none" onchange="handleFileSelect(event)">
+
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+      <label style="margin:0">Filtrer sur auteur :</label>
+      <input id="author-filter" type="text" value="Timothée Roy" style="max-width:200px">
+      <label style="margin:0"><input type="checkbox" id="dry-run-check"> Dry-run (validation sans écriture)</label>
+    </div>
+
+    <div id="ingest-status"></div>
+  </div>
+
+  <div class="card" id="profile-card">
+    <h2>État du corpus</h2>
+    <div id="profile-body" style="color:var(--text-dim)">Chargement…</div>
+  </div>
+
+</div><!-- /tab-profil -->
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- ONGLET 2 — Scoreur                                                    -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div id="tab-scoreur" class="tab">
+
+  <div class="row">
+    <div class="col" style="flex:2">
+      <div class="card">
+        <h2>Brouillon</h2>
+        <div class="row" style="margin-bottom:8px">
+          <div class="col">
+            <label>Format</label>
+            <select id="score-format">
+              <option>Text only</option>
+              <option>Image</option>
+              <option>Video</option>
+              <option>Document-Carousel</option>
+            </select>
+          </div>
+        </div>
+        <textarea id="score-text" placeholder="Coller le brouillon ici…" oninput="debouncedScore()"></textarea>
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="primary" onclick="doScore()">Scorer</button>
+          <span id="score-spinner" style="display:none"><span class="spin"></span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <h2>Résultat</h2>
+        <div id="score-result">
+          <div style="color:var(--text-dim)">En attente…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /tab-scoreur -->
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- ONGLET 3 — Bandit                                                     -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div id="tab-bandit" class="tab">
+
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <h2>Recommandation</h2>
+        <button class="primary" onclick="doRecommend()">Recommander</button>
+        <div id="recommend-result" style="margin-top:12px;color:var(--text-dim)">—</div>
+      </div>
+      <div class="card">
+        <h2>Posteriors par archétype</h2>
+        <table id="posteriors-table">
+          <thead><tr><th>Archétype</th><th>α</th><th>β</th><th>θ̄</th></tr></thead>
+          <tbody id="posteriors-body"><tr><td colspan="4" style="color:var(--text-dim)">—</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <h2>Enregistrer un résultat</h2>
+        <div style="color:var(--amber);font-size:11px;margin-bottom:12px">
+          ⚠ Sans saisie du résultat, le système n'apprend pas.
+        </div>
+        <label>Archétype publié</label>
+        <select id="update-arm" style="margin-bottom:8px">
+          <option value="contrarian">Contrarian</option>
+          <option value="data">Data</option>
+          <option value="question">Question</option>
+          <option value="statement">Statement</option>
+        </select>
+        <label>Résultat tail (top 20 %)</label>
+        <select id="update-tail" style="margin-bottom:8px">
+          <option value="1">1 — Oui (eng ≥ q80)</option>
+          <option value="0">0 — Non</option>
+        </select>
+        <label>Leads qualifiés</label>
+        <input id="update-leads" type="number" min="0" value="0" style="margin-bottom:8px">
+        <label>ID post (optionnel, pour leads.csv)</label>
+        <input id="update-post-id" type="text" placeholder="ex: urn:li:activity:..." style="margin-bottom:12px">
+        <button class="primary" onclick="doUpdate()">Mettre à jour le bandit</button>
+        <div id="update-result" style="margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /tab-bandit -->
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- ONGLET 4 — Monitoring                                                 -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div id="tab-monitor" class="tab">
+
+  <div class="card" id="monitor-alarm-banner" style="display:none;border-color:var(--amber)">
+    <span style="color:var(--amber)">&#9888; Rupture de régime détectée — ré-entraînement recommandé.</span>
+    <span id="alarm-detail" style="color:var(--text-dim);margin-left:8px"></span>
+  </div>
+
+  <div class="card">
+    <h2>Dynamique d'audience — abonnés &amp; impressions</h2>
+    <div id="chart-growth" class="plotly-chart"></div>
+  </div>
+
+  <div class="card">
+    <h2>Distribution de l'engagement</h2>
+    <div id="chart-distribution" class="plotly-chart"></div>
+  </div>
+
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <h2>Statistiques CUSUM</h2>
+        <div id="chart-cusum" class="plotly-chart"></div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h2>Posteriors bandit (dernier backtest)</h2>
+        <div id="chart-bandit" class="plotly-chart"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Totaux</h2>
+    <div id="monitor-totals" style="color:var(--text-dim)">Chargement…</div>
+  </div>
+
+  <div class="card">
+    <h2>Alarmes CUSUM</h2>
+    <table>
+      <thead><tr><th>Date</th><th>Direction</th><th>Statistique</th></tr></thead>
+      <tbody id="alarms-body"><tr><td colspan="3" style="color:var(--text-dim)">—</td></tr></tbody>
+    </table>
+  </div>
+
+  <button class="secondary" onclick="loadMonitor()" style="margin-top:4px">Rafraîchir monitoring</button>
+
+  <!-- ─── Table des posts ─────────────────────────────────────────────── -->
+  <div class="card" style="margin-top:20px">
+    <h2>Détail des posts</h2>
+
+    <!-- Filtres -->
+    <div class="row" style="margin-bottom:12px;gap:10px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:6px">
+        <label style="margin:0;white-space:nowrap">Format</label>
+        <select id="posts-filter-format" onchange="loadPostsTable(1)" style="width:140px">
+          <option value="">Tous</option>
+          <option>Text only</option>
+          <option>Image</option>
+          <option>Video</option>
+          <option>Document-Carousel</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <label style="margin:0;white-space:nowrap">Hook Type</label>
+        <select id="posts-filter-hook" onchange="loadPostsTable(1)" style="width:130px">
+          <option value="">Tous</option>
+          <option>Contrarian</option>
+          <option>Question</option>
+          <option>Data</option>
+          <option>Statement</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <label style="margin:0">Has CTA</label>
+        <select id="posts-filter-cta" onchange="loadPostsTable(1)" style="width:100px">
+          <option value="">Tous</option>
+          <option value="true">Oui</option>
+          <option value="false">Non</option>
+        </select>
+      </div>
+      <div style="margin-left:auto;color:var(--text-dim);font-size:11px;align-self:center" id="posts-count"></div>
+    </div>
+
+    <div style="overflow-x:auto">
+      <table class="posts-table" id="posts-table-el">
+        <thead>
+          <tr>
+            <th style="width:30px">#</th>
+            <th class="sort-desc" data-sort="date" onclick="sortPosts('date')" style="min-width:200px">Post Text (excerpt)</th>
+            <th data-sort="date" onclick="sortPosts('date')" style="width:90px">Date</th>
+            <th style="width:100px">Format</th>
+            <th style="width:90px">Hook Type</th>
+            <th data-sort="likes" onclick="sortPosts('likes')" style="width:55px">Likes</th>
+            <th data-sort="comments" onclick="sortPosts('comments')" style="width:70px">Comments</th>
+            <th data-sort="shares" onclick="sortPosts('shares')" style="width:55px">Shares</th>
+            <th data-sort="eng_score" onclick="sortPosts('eng_score')" style="width:70px">Eng.Score</th>
+            <th data-sort="text_len" onclick="sortPosts('text_len')" style="width:65px">Text Len</th>
+            <th style="width:45px">Emoji</th>
+            <th style="width:55px">Link</th>
+            <th style="width:45px">CTA</th>
+            <th style="width:60px">URL</th>
+          </tr>
+        </thead>
+        <tbody id="posts-tbody">
+          <tr><td colspan="14" style="color:var(--text-dim);text-align:center">Chargement…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Pagination -->
+    <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+      <button class="secondary" id="posts-prev" onclick="loadPostsTable(_postsPage - 1)" disabled>◀ Précédent</button>
+      <span id="posts-pager" style="color:var(--text-dim);font-size:11px"></span>
+      <button class="secondary" id="posts-next" onclick="loadPostsTable(_postsPage + 1)">Suivant ▶</button>
+    </div>
+  </div>
+
+</div><!-- /tab-monitor -->
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- ONGLET 5 — Leads & Backtest                                           -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div id="tab-leads" class="tab">
+
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <h2>Leads qualifiés</h2>
+        <div style="color:var(--text-dim);font-size:11px;margin-bottom:10px">
+          1 lead = 1 conversation qualifiée (MP, commentaire mot-clé, RDV).
+          Saisie manuelle — sans CRM connecté.
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <div class="col">
+            <label>ID post</label>
+            <input id="lead-post-id" type="text" placeholder="urn:li:activity:…">
+          </div>
+          <div style="width:100px">
+            <label>Leads</label>
+            <input id="lead-contacts" type="number" min="0" value="1">
+          </div>
+          <div style="display:flex;align-items:flex-end">
+            <button class="primary" onclick="saveLead()">Ajouter / MAJ</button>
+          </div>
+        </div>
+        <div id="lead-save-status"></div>
+        <table style="margin-top:10px">
+          <thead><tr><th>Post ID</th><th>Leads</th></tr></thead>
+          <tbody id="leads-body"><tr><td colspan="2" style="color:var(--text-dim)">—</td></tr></tbody>
+        </table>
+        <div id="leads-total" style="margin-top:6px;color:var(--text-dim);font-size:11px"></div>
+      </div>
+    </div>
+
+    <div class="col" style="flex:1.5">
+      <div class="card">
+        <h2>Backtest — 3 politiques</h2>
+        <div id="leads-warning" style="display:none" class="msg warn" >
+          ⚠ leads.csv vide — récompense = proxy reach uniquement (w_tail·tail).
+          Remplissez les leads pour activer la récompense métier.
+        </div>
+        <button class="primary" onclick="doBacktest()" id="backtest-btn">Lancer le backtest</button>
+        <div id="backtest-spinner" style="display:none;margin-top:8px;color:var(--text-dim)">
+          Calcul en cours… <span class="spin"></span>
+        </div>
+        <div id="backtest-summary" style="margin-top:12px"></div>
+      </div>
+
+      <div class="card" id="backtest-charts" style="display:none">
+        <h3>Récompense cumulée</h3>
+        <canvas id="chart-backtest-reward"></canvas>
+        <h3 style="margin-top:14px">Regret cumulé (P0 − P2)</h3>
+        <canvas id="chart-backtest-regret"></canvas>
+        <h3 style="margin-top:14px">Posteriors P2 par archétype</h3>
+        <canvas id="chart-backtest-post"></canvas>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /tab-leads -->
+
+</main>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────
+// Tiny charting (no dependency — canvas 2D only)
+// ─────────────────────────────────────────────────────────────────────────
+
+function drawLineChart(canvasId, datasets, labels, opts = {}) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const W = canvas.offsetWidth || 800, H = 220;
+  canvas.width = W * devicePixelRatio;
+  canvas.height = H * devicePixelRatio;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+
+  const PAD = { top: 16, right: 16, bottom: 40, left: 50 };
+  const pw = W - PAD.left - PAD.right;
+  const ph = H - PAD.top - PAD.bottom;
+
+  ctx.fillStyle = '#252525';
+  ctx.fillRect(0, 0, W, H);
+
+  // Compute global min/max
+  let allY = datasets.flatMap(d => d.data);
+  let minY = opts.minY !== undefined ? opts.minY : Math.min(...allY);
+  let maxY = opts.maxY !== undefined ? opts.maxY : Math.max(...allY);
+  if (maxY === minY) maxY = minY + 1;
+
+  const n = labels.length;
+  const xScale = i => PAD.left + (i / (n - 1)) * pw;
+  const yScale = v => PAD.top + ph - ((v - minY) / (maxY - minY)) * ph;
+
+  // Grid lines
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = PAD.top + (i / 4) * ph;
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + pw, y); ctx.stroke();
+    const val = maxY - (i / 4) * (maxY - minY);
+    ctx.fillStyle = '#666'; ctx.font = '10px monospace';
+    ctx.textAlign = 'right'; ctx.fillText(val.toFixed(1), PAD.left - 4, y + 3);
+  }
+
+  // Alarm markers
+  if (opts.alarmDates) {
+    opts.alarmDates.forEach(ad => {
+      const idx = labels.findIndex(l => l >= ad);
+      if (idx < 0) return;
+      const x = xScale(idx);
+      ctx.strokeStyle = '#e8540a';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(x, PAD.top); ctx.lineTo(x, PAD.top + ph); ctx.stroke();
+      ctx.setLineDash([]);
+    });
+  }
+
+  // Series
+  datasets.forEach(ds => {
+    ctx.strokeStyle = ds.color || '#e8540a';
+    ctx.lineWidth = ds.lineWidth || 1.5;
+    if (ds.dash) ctx.setLineDash(ds.dash); else ctx.setLineDash([]);
+    ctx.beginPath();
+    ds.data.forEach((v, i) => {
+      const x = xScale(i), y = yScale(v);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  });
+
+  // X axis labels (sparse)
+  ctx.fillStyle = '#666'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+  const step = Math.max(1, Math.floor(n / 6));
+  for (let i = 0; i < n; i += step) {
+    ctx.fillText(labels[i].slice(0, 7), xScale(i), H - PAD.bottom + 14);
+  }
+
+  // Legend
+  if (opts.legend) {
+    let lx = PAD.left;
+    opts.legend.forEach((l, i) => {
+      ctx.fillStyle = datasets[i].color || '#e8540a';
+      ctx.fillRect(lx, 4, 18, 6);
+      ctx.fillStyle = '#aaa'; ctx.textAlign = 'left';
+      ctx.fillText(l, lx + 22, 11);
+      lx += ctx.measureText(l).width + 36;
+    });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// API helpers
+// ─────────────────────────────────────────────────────────────────────────
+
+const API = '';  // same origin
+
+async function apiFetch(path, opts = {}) {
+  const r = await fetch(API + path, opts);
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(err.detail || r.statusText);
+  }
+  return r.json();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tab navigation
+// ─────────────────────────────────────────────────────────────────────────
+
+function showTab(id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  event.target.classList.add('active');
+  if (id === 'profil') loadProfile();
+  if (id === 'monitor') { loadMonitor(); loadPostsTable(1); }
+  if (id === 'bandit') doRecommend();
+  if (id === 'leads') loadLeads();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Health check
+// ─────────────────────────────────────────────────────────────────────────
+
+async function checkHealth() {
+  try {
+    const h = await apiFetch('/api/health');
+    const dot = document.getElementById('health-dot');
+    dot.className = h.status === 'ok' ? 'ok' : 'degraded';
+    dot.title = 'API: ' + h.status + ' | posts: ' + (h.posts_count ?? '?');
+  } catch(e) {
+    document.getElementById('health-dot').className = '';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Onglet 1 — Profil / MAJ
+// ─────────────────────────────────────────────────────────────────────────
+
+function openProfile() {
+  window.open(document.getElementById('profile-url').value, '_blank');
+}
+
+function handleDrop(ev) {
+  ev.preventDefault();
+  document.getElementById('drop-zone').classList.remove('over');
+  const file = ev.dataTransfer.files[0];
+  if (file) ingestFile(file);
+}
+
+function handleFileSelect(ev) {
+  const file = ev.target.files[0];
+  if (file) ingestFile(file);
+}
+
+async function ingestFile(file) {
+  const statusEl = document.getElementById('ingest-status');
+  const author = document.getElementById('author-filter').value.trim();
+  const dryRun = document.getElementById('dry-run-check').checked;
+  statusEl.innerHTML = '<div class="msg">Ingestion en cours… <span class="spin"></span></div>';
+  const fd = new FormData();
+  fd.append('file', file);
+  if (author) fd.append('author', author);
+  fd.append('dry_run', dryRun ? 'true' : 'false');
+  try {
+    const r = await apiFetch('/api/ingest', { method: 'POST', body: fd });
+    const tag = dryRun ? ' (dry-run)' : '';
+    statusEl.innerHTML = `<div class="msg ok">
+      ✓ Ingestion réussie${tag}<br>
+      Posts importés : <b>${r.n_posts}</b> (${r.n_new >= 0 ? '+' + r.n_new + ' nouveaux' : ''})<br>
+      Tail rate : <b>${(r.tail_rate * 100).toFixed(1)} %</b> &nbsp;|&nbsp;
+      Plage : <b>${r.date_range}</b> &nbsp;|&nbsp;
+      Doublons supprimés : <b>${r.duplicates_removed}</b>
+      ${r.snapshot ? '<br>Snapshot : ' + r.snapshot : ''}
+    </div>`;
+    if (!dryRun) { loadProfile(); checkHealth(); }
+  } catch(e) {
+    statusEl.innerHTML = `<div class="msg err">✗ ${e.message}</div>`;
+  }
+}
+
+async function loadProfile() {
+  const el = document.getElementById('profile-body');
+  try {
+    const p = await apiFetch('/api/profile');
+    el.innerHTML = `
+      <div class="row">
+        <div class="col">
+          <div style="color:var(--text-dim);font-size:11px">Posts</div>
+          <div style="font-size:24px;font-weight:bold">${p.posts_count}</div>
+        </div>
+        <div class="col">
+          <div style="color:var(--text-dim);font-size:11px">Tail rate</div>
+          <div style="font-size:24px;font-weight:bold">${(p.tail_rate * 100).toFixed(1)} %</div>
+        </div>
+        <div class="col">
+          <div style="color:var(--text-dim);font-size:11px">Dernier post</div>
+          <div style="font-size:18px">${p.last_post_days_ago != null ? p.last_post_days_ago + ' j' : '—'}</div>
+        </div>
+        <div class="col">
+          <div style="color:var(--text-dim);font-size:11px">Dernière MAJ</div>
+          <div style="font-size:12px">${p.last_updated || '—'}</div>
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <div class="card" style="background:var(--bg3)">
+          <h3>Tail rate par archétype</h3>
+          <table><thead><tr><th>Archétype</th><th>Tail rate</th></tr></thead><tbody>
+            ${Object.entries(p.top_archetypes).sort((a,b)=>b[1]-a[1]).map(([k,v]) =>
+              `<tr><td>${k}</td><td>${(v*100).toFixed(1)} %</td></tr>`).join('')}
+          </tbody></table>
+        </div>
+      </div>`;
+  } catch(e) {
+    el.textContent = 'Erreur : ' + e.message;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Onglet 2 — Scoreur
+// ─────────────────────────────────────────────────────────────────────────
+
+let _scoreTimer;
+function debouncedScore() {
+  clearTimeout(_scoreTimer);
+  _scoreTimer = setTimeout(doScore, 800);
+}
+
+async function doScore() {
+  const text = document.getElementById('score-text').value.trim();
+  if (!text) return;
+  const format = document.getElementById('score-format').value;
+  document.getElementById('score-spinner').style.display = '';
+  try {
+    const r = await apiFetch('/api/score', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, format }),
+    });
+    const pct = Math.round(r.p_queue * 100);
+    const color = r.p_queue >= 0.55 ? 'var(--green)' : r.p_queue >= 0.30 ? 'var(--amber)' : 'var(--red)';
+    const badgeCls = r.p_queue >= 0.55 ? 'green' : r.p_queue >= 0.30 ? 'amber' : 'red';
+
+    document.getElementById('score-result').innerHTML = `
+      <div class="gauge-wrap">
+        <div class="gauge-label" style="color:${color}">${pct} %</div>
+        <div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">P(queue)</div>
+        <div class="gauge-track"><div class="gauge-fill" style="width:${pct}%;background:${color}"></div></div>
+      </div>
+      <div style="margin:10px 0"><span class="badge ${badgeCls}">${r.verdict.toUpperCase()}</span></div>
+      <table style="margin-bottom:10px">
+        <thead><tr><th>Feature</th><th>Valeur</th><th>Contribution</th></tr></thead>
+        <tbody>
+          ${r.contributions.map(c => {
+            const barW = Math.min(60, Math.abs(c.contribution) * 400);
+            const barCol = c.contribution >= 0 ? 'var(--green)' : 'var(--red)';
+            return `<tr>
+              <td>${c.feature}</td>
+              <td>${c.value.toFixed(3)}</td>
+              <td>
+                <span class="contrib-bar" style="width:${barW}px;background:${barCol}"></span>
+                <span style="margin-left:4px;color:${barCol}">${c.contribution > 0 ? '+' : ''}${c.contribution.toFixed(3)}</span>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <div>
+        ${r.suggestions.map(s => `<div class="msg ${r.verdict === 'publish' ? 'ok' : 'warn'}" style="margin-bottom:4px">${s}</div>`).join('')}
+      </div>`;
+  } catch(e) {
+    document.getElementById('score-result').innerHTML = `<div class="msg err">${e.message}</div>`;
+  } finally {
+    document.getElementById('score-spinner').style.display = 'none';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Onglet 3 — Bandit
+// ─────────────────────────────────────────────────────────────────────────
+
+async function doRecommend() {
+  try {
+    const r = await apiFetch('/api/recommend');
+    document.getElementById('recommend-result').innerHTML =
+      `<div style="font-size:20px;font-weight:bold;color:var(--orange)">${r.recommended_arm}</div>
+       <div style="color:var(--text-dim);font-size:11px;margin-top:4px">Archétype recommandé pour le prochain post</div>`;
+
+    const tbody = document.getElementById('posteriors-body');
+    tbody.innerHTML = Object.entries(r.posteriors)
+      .sort((a, b) => b[1].theta - a[1].theta)
+      .map(([arm, p]) => {
+        const pct = Math.round(p.theta * 100);
+        return `<tr>
+          <td>${arm}</td>
+          <td>${p.alpha}</td>
+          <td>${p.beta}</td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px">
+              <div style="width:80px;height:6px;background:var(--bg3);border-radius:3px">
+                <div style="width:${pct}%;height:100%;background:var(--orange);border-radius:3px"></div>
+              </div>
+              ${(p.theta * 100).toFixed(1)} %
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
+  } catch(e) {
+    document.getElementById('recommend-result').textContent = 'Erreur : ' + e.message;
+  }
+}
+
+async function doUpdate() {
+  const arm = document.getElementById('update-arm').value;
+  const tail = parseInt(document.getElementById('update-tail').value);
+  const leads = parseInt(document.getElementById('update-leads').value) || 0;
+  const post_id = document.getElementById('update-post-id').value.trim() || null;
+  const el = document.getElementById('update-result');
+  try {
+    const r = await apiFetch('/api/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ arm, tail, leads, post_id }),
+    });
+    el.innerHTML = `<div class="msg ok">
+      Récompense : <b>${(r.reward * 100).toFixed(1)} %</b> &nbsp;|&nbsp;
+      Bandit mis à jour ✓
+    </div>`;
+    doRecommend();
+  } catch(e) {
+    el.innerHTML = `<div class="msg err">${e.message}</div>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Onglet 4 — Monitoring
+// ─────────────────────────────────────────────────────────────────────────
+
+const PLOTLY_LAYOUT_BASE = {
+  paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
+  font: { color: '#e0e0e0', family: 'SF Mono, Fira Code, monospace', size: 11 },
+  margin: { t: 30, b: 50, l: 50, r: 20 },
+  legend: { orientation: 'h', y: -0.2 },
+  xaxis: { gridcolor: '#333', linecolor: '#3a3a3a' },
+  yaxis: { gridcolor: '#333', linecolor: '#3a3a3a' },
+};
+
+async function loadMonitor() {
+  try {
+    const [r, figs] = await Promise.all([
+      apiFetch('/api/monitor'),
+      apiFetch('/api/monitor/figures'),
+    ]);
+
+    // Alarm banner
+    const banner = document.getElementById('monitor-alarm-banner');
+    if (r.retrain_recommended) {
+      banner.style.display = '';
+      document.getElementById('alarm-detail').textContent =
+        r.days_since_last_alarm != null ? `(il y a ${r.days_since_last_alarm} j)` : '';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    // Plotly figures
+    const renderFig = (divId, figJson) => {
+      const fig = JSON.parse(figJson);
+      fig.layout = Object.assign({}, PLOTLY_LAYOUT_BASE, fig.layout,
+        { paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a' });
+      Plotly.newPlot(divId, fig.data, fig.layout, { responsive: true, displaylogo: false });
+    };
+    if (figs.growth)       renderFig('chart-growth', figs.growth);
+    if (figs.distribution) renderFig('chart-distribution', figs.distribution);
+    if (figs.cusum)        renderFig('chart-cusum', figs.cusum);
+    if (figs.bandit)       renderFig('chart-bandit', figs.bandit);
+
+    // Totals
+    const t = r.totals;
+    document.getElementById('monitor-totals').innerHTML = `
+      <div class="row">
+        <div class="col"><div style="color:var(--text-dim);font-size:11px">Impressions totales</div><div style="font-size:20px">${t.impressions.toLocaleString('fr')}</div></div>
+        <div class="col"><div style="color:var(--text-dim);font-size:11px">Abonnés gagnés</div><div style="font-size:20px">${t.new_followers.toLocaleString('fr')}</div></div>
+        <div class="col"><div style="color:var(--text-dim);font-size:11px">Impressions/j (moy.)</div><div style="font-size:20px">${t.avg_daily_impressions.toFixed(0)}</div></div>
+      </div>`;
+
+    // Alarms table
+    document.getElementById('alarms-body').innerHTML = r.alarms.length
+      ? r.alarms.map(a => `<tr><td>${a.date}</td><td>${a.direction}</td><td>${a.statistic}</td></tr>`).join('')
+      : '<tr><td colspan="3" style="color:var(--text-dim)">Aucune alarme détectée</td></tr>';
+
+  } catch(e) {
+    document.getElementById('monitor-totals').textContent = 'Erreur : ' + e.message;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Posts table
+// ─────────────────────────────────────────────────────────────────────────
+
+let _postsPage = 1;
+let _postsSortBy = 'date';
+let _postsSortOrder = 'desc';
+const POSTS_PER_PAGE = 25;
+
+function sortPosts(col) {
+  if (_postsSortBy === col) {
+    _postsSortOrder = _postsSortOrder === 'desc' ? 'asc' : 'desc';
+  } else {
+    _postsSortBy = col;
+    _postsSortOrder = 'desc';
+  }
+  // Update header indicators
+  document.querySelectorAll('#posts-table-el th').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    if (th.dataset.sort === col) th.classList.add(_postsSortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
+  });
+  loadPostsTable(1);
+}
+
+async function loadPostsTable(page = 1) {
+  _postsPage = page;
+  const format   = document.getElementById('posts-filter-format').value;
+  const hookType = document.getElementById('posts-filter-hook').value;
+  const cta      = document.getElementById('posts-filter-cta').value;
+
+  let url = `/api/posts?sort_by=${_postsSortBy}&order=${_postsSortOrder}&limit=${POSTS_PER_PAGE}&offset=${(page-1)*POSTS_PER_PAGE}`;
+  if (format)   url += `&format=${encodeURIComponent(format)}`;
+  if (hookType) url += `&hook_type=${encodeURIComponent(hookType)}`;
+  if (cta !== '') url += `&has_cta_filter=${cta}`;
+
+  try {
+    const r = await apiFetch(url);
+    const tbody = document.getElementById('posts-tbody');
+    const ENG_Q80 = 98.2;
+
+    if (!r.posts.length) {
+      tbody.innerHTML = '<tr><td colspan="14" style="color:var(--text-dim);text-align:center">Aucun post</td></tr>';
+    } else {
+      tbody.innerHTML = r.posts.map(p => {
+        const scoreCls = p.eng_score >= ENG_Q80 ? 'score-high' : p.eng_score >= 40 ? 'score-mid' : '';
+        const hookTag  = `<span class="tag ${p.hook_type.toLowerCase()}">${p.hook_type}</span>`;
+        const fmtTag   = p.format === 'Image' ? `<span class="tag image">Image</span>`
+                       : p.format === 'Video' ? `<span class="tag video">Video</span>`
+                       : `<span style="color:var(--text-dim)">${p.format}</span>`;
+        const ctaTag   = p.has_cta ? `<span class="tag cta-yes">CTA</span>` : `<span class="bool-no">—</span>`;
+        const linkBadge = p.has_link ? `<span class="bool-yes">✓</span>` : `<span class="bool-no">—</span>`;
+        const url = p.permalink.startsWith('http')
+          ? `<a href="${p.permalink}" target="_blank" style="color:var(--orange);font-size:10px">↗</a>`
+          : `<span style="color:var(--text-dim);font-size:10px">—</span>`;
+        return `<tr>
+          <td style="color:var(--text-dim)">${p.rank}</td>
+          <td title="${p.excerpt.replace(/"/g,'&quot;')}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${p.excerpt}</td>
+          <td style="color:var(--text-dim)">${p.date || '—'}</td>
+          <td>${fmtTag}</td>
+          <td>${hookTag}</td>
+          <td>${p.likes}</td>
+          <td>${p.comments}</td>
+          <td>${p.shares}</td>
+          <td class="${scoreCls}">${p.eng_score.toFixed(0)}</td>
+          <td style="color:var(--text-dim)">${p.text_len}</td>
+          <td style="color:var(--text-dim)">${p.emoji || '—'}</td>
+          <td>${linkBadge}</td>
+          <td>${ctaTag}</td>
+          <td>${url}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Pagination controls
+    const totalPages = Math.ceil(r.total / POSTS_PER_PAGE);
+    document.getElementById('posts-count').textContent = `${r.total} posts`;
+    document.getElementById('posts-pager').textContent = `Page ${page} / ${totalPages}`;
+    document.getElementById('posts-prev').disabled = page <= 1;
+    document.getElementById('posts-next').disabled = page >= totalPages;
+
+  } catch(e) {
+    document.getElementById('posts-tbody').innerHTML =
+      `<tr><td colspan="14" class="msg err">${e.message}</td></tr>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Onglet 5 — Leads & Backtest
+// ─────────────────────────────────────────────────────────────────────────
+
+async function loadLeads() {
+  try {
+    const r = await apiFetch('/api/leads');
+    document.getElementById('leads-body').innerHTML = r.leads.length
+      ? r.leads.map(l => `<tr><td style="font-size:10px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${l.post_id}</td><td>${l.qualified_contacts}</td></tr>`).join('')
+      : '<tr><td colspan="2" style="color:var(--text-dim)">Aucun lead saisi</td></tr>';
+    document.getElementById('leads-total').textContent =
+      r.total_leads > 0 ? `Total : ${r.total_leads} contacts qualifiés` : '';
+  } catch(e) {
+    document.getElementById('leads-body').innerHTML = `<tr><td colspan="2" class="msg err">${e.message}</td></tr>`;
+  }
+}
+
+async function saveLead() {
+  const post_id = document.getElementById('lead-post-id').value.trim();
+  const qualified_contacts = parseInt(document.getElementById('lead-contacts').value) || 0;
+  const el = document.getElementById('lead-save-status');
+  if (!post_id) { el.innerHTML = '<div class="msg err">ID post requis</div>'; return; }
+  try {
+    const r = await apiFetch('/api/leads', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ post_id, qualified_contacts }),
+    });
+    el.innerHTML = `<div class="msg ok">${r.action === 'created' ? 'Créé' : 'Mis à jour'} ✓</div>`;
+    loadLeads();
+  } catch(e) {
+    el.innerHTML = `<div class="msg err">${e.message}</div>`;
+  }
+}
+
+let _backtestCharts = {};
+async function doBacktest() {
+  const btn = document.getElementById('backtest-btn');
+  btn.disabled = true;
+  document.getElementById('backtest-spinner').style.display = '';
+  document.getElementById('backtest-summary').innerHTML = '';
+  try {
+    const r = await apiFetch('/api/backtest', { method: 'POST' });
+
+    document.getElementById('leads-warning').style.display =
+      r.leads_csv_empty ? '' : 'none';
+
+    document.getElementById('backtest-summary').innerHTML = `
+      <table>
+        <thead><tr><th>Politique</th><th>Récompense totale</th></tr></thead>
+        <tbody>
+          <tr><td>P0 — Statique (baseline)</td><td>${r.total_reward_P0.toFixed(3)}</td></tr>
+          <tr><td>P1 — Thompson stationnaire</td><td>${r.total_reward_P1.toFixed(3)}</td></tr>
+          <tr><td>P2 — Thompson à escompte (γ=0.985)</td><td><b>${r.total_reward_P2.toFixed(3)}</b></td></tr>
+        </tbody>
+      </table>
+      <div style="margin-top:8px;font-size:11px;color:var(--text-dim)">
+        Regret P0−P2 : <b style="color:${r.regret_P2_vs_P0 <= 0 ? 'var(--green)' : 'var(--amber)'}">
+          ${r.regret_P2_vs_P0.toFixed(3)}</b> &nbsp;|&nbsp;
+        P2 > P1 : <b>${r.p2_beats_p1 ? '✓' : '✗'}</b> &nbsp;|&nbsp;
+        P1 > P0 : <b>${r.p1_beats_p0 ? '✓' : '✗'}</b><br>
+        Ruptures détectées : ${r.changepoints_detected.join(', ') || 'aucune'}
+      </div>`;
+
+    document.getElementById('backtest-charts').style.display = '';
+    const alarmDates = r.changepoints_detected;
+
+    drawLineChart('chart-backtest-reward', [
+      { data: r.cum_reward_P0, color: '#888', dash: [4, 3] },
+      { data: r.cum_reward_P1, color: '#4fc3f7' },
+      { data: r.cum_reward_P2, color: '#ef5350' },
+    ], r.dates, {
+      alarmDates,
+      legend: ['P0 Statique', 'P1 Stationnaire', 'P2 Escompte'],
+    });
+
+    drawLineChart('chart-backtest-regret', [
+      { data: r.regret, color: '#ab47bc' },
+    ], r.dates, { alarmDates });
+
+    const COLORS = { contrarian: '#e8540a', data: '#4fc3f7', question: '#4caf50', statement: '#888' };
+    const arms = Object.keys(r.posteriors_over_time[0] || {});
+    drawLineChart('chart-backtest-post', arms.map(a => ({
+      data: r.posteriors_over_time.map(p => p[a]),
+      color: COLORS[a] || '#ccc',
+    })), r.dates, {
+      alarmDates,
+      minY: 0, maxY: 1,
+      legend: arms,
+    });
+
+  } catch(e) {
+    document.getElementById('backtest-summary').innerHTML = `<div class="msg err">${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    document.getElementById('backtest-spinner').style.display = 'none';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────────────────────
+
+checkHealth();
+loadProfile();
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+.mypy_cache/
+growth_state.json
+data/snapshots/
+data/leads.csv
+data/backtest_results.png
+data/backtest_posteriors.json
