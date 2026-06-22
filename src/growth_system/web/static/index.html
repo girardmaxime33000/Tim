@@ -131,11 +131,11 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 </header>
 
 <nav>
-  <button class="active" onclick="showTab('profil')">Profil / MAJ</button>
-  <button onclick="showTab('scoreur')">Scoreur</button>
+  <button class="active" onclick="showTab('scoreur')">Scoreur</button>
   <button onclick="showTab('bandit')">Bandit</button>
   <button onclick="showTab('monitor')">Monitoring</button>
   <button onclick="showTab('leads')">Leads &amp; Backtest</button>
+  <button onclick="showTab('profil')">Corpus</button>
 </nav>
 
 <main>
@@ -143,7 +143,7 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <!-- ONGLET 1 — Profil / MAJ                                               -->
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
-<div id="tab-profil" class="tab active">
+<div id="tab-profil" class="tab">
 
   <div class="card">
     <h2>Mise à jour du profil</h2>
@@ -192,7 +192,7 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <!-- ONGLET 2 — Scoreur                                                    -->
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
-<div id="tab-scoreur" class="tab">
+<div id="tab-scoreur" class="tab active">
 
   <div class="row">
     <div class="col" style="flex:2">
@@ -1160,7 +1160,6 @@ async function doBacktest() {
 // Init
 // ─────────────────────────────────────────────────────────────────────────
 
-loadProfile();
 </script>
 </body>
 </html>
