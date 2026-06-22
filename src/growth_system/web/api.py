@@ -298,6 +298,33 @@ def score(req: ScoreRequest) -> ScoreResponse:
         for c in raw_contribs
     ]
     suggestions = _build_suggestions(raw_contribs, verdict)
+
+    # Append to score_log.csv (separate file, never touches posts.csv / growth_state.json)
+    import datetime as _dt, csv as _csv, tempfile as _tmp, shutil as _shutil
+    _log_row = {
+        "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
+        "text_excerpt": req.text[:160],
+        "p_queue": round(p, 4),
+        "verdict": verdict,
+        "format": req.format,
+    }
+    _cols = list(_log_row.keys())
+    _rows: list[dict] = []
+    if SCORE_LOG_CSV.exists():
+        try:
+            _rows = pd.read_csv(SCORE_LOG_CSV).to_dict("records")
+        except Exception:
+            pass
+    _rows.append(_log_row)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with _tmp.NamedTemporaryFile(mode="w", dir=DATA_DIR, suffix=".tmp",
+                                 delete=False, newline="") as _tf:
+        _w = _csv.DictWriter(_tf, fieldnames=_cols)
+        _w.writeheader()
+        _w.writerows(_rows)
+        _tf_path = _tf.name
+    _shutil.move(_tf_path, str(SCORE_LOG_CSV))
+
     return ScoreResponse(
         p_queue=round(p, 4),
         verdict=verdict,
@@ -361,6 +388,8 @@ def update(req: UpdateRequest) -> UpdateResponse:
 
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
 LAST_INGEST_JSON = DATA_DIR / "last_ingest.json"
+SCORE_LOG_CSV = DATA_DIR / "score_log.csv"
+PRECISION_LOG_CSV = DATA_DIR / "precision_log.csv"
 
 
 class IngestResponse(BaseModel):
@@ -426,9 +455,41 @@ async def ingest(
     # Persist last ingest timestamp (atomic)
     import datetime as _dt
     _li_tmp = LAST_INGEST_JSON.with_suffix(".tmp")
+    _now_iso = _dt.datetime.now().isoformat(timespec="seconds")
     with open(_li_tmp, "w") as _f:
-        json.dump({"last_ingest_at": _dt.datetime.now().isoformat(timespec="seconds")}, _f)
+        json.dump({"last_ingest_at": _now_iso}, _f)
     _li_tmp.rename(LAST_INGEST_JSON)
+
+    # Compute and append precision@20% to precision_log.csv
+    try:
+        _pf = pd.read_csv(POSTS_CSV)
+        _scorer_live = _get_scorer()
+        _pf["text"] = _pf["text"].fillna("").astype(str)
+        _pf["p_queue"] = _pf["text"].apply(_scorer_live.score)
+        _pf["in_tail"] = (_pf["eng_score"] >= ENG_Q80).astype(int)
+        n_p = len(_pf)
+        k = max(1, round(n_p * 0.20))
+        top_k_idx = _pf["p_queue"].nlargest(k).index
+        precision_at_20 = float(_pf.loc[top_k_idx, "in_tail"].mean())
+
+        _pr_rows: list[dict] = []
+        if PRECISION_LOG_CSV.exists():
+            try:
+                _pr_rows = pd.read_csv(PRECISION_LOG_CSV).to_dict("records")
+            except Exception:
+                pass
+        _pr_rows.append({"timestamp": _now_iso, "precision_at_20": round(precision_at_20, 4),
+                          "n_posts": n_p})
+        import csv as _csv2, tempfile as _tmp2, shutil as _shutil2
+        with _tmp2.NamedTemporaryFile(mode="w", dir=DATA_DIR, suffix=".tmp",
+                                      delete=False, newline="") as _pf2:
+            _pw = _csv2.DictWriter(_pf2, fieldnames=["timestamp", "precision_at_20", "n_posts"])
+            _pw.writeheader()
+            _pw.writerows(_pr_rows)
+            _pf2_path = _pf2.name
+        _shutil2.move(_pf2_path, str(PRECISION_LOG_CSV))
+    except Exception:
+        pass  # never block ingest on log failure
 
     return IngestResponse(**summary)
 
@@ -475,6 +536,8 @@ class MonitorResponse(BaseModel):
     leads_coverage: LeadsCoverage
     leads_by_archetype: list[LeadsByArchetypeItem]
     freshness: FreshnessInfo
+    scoring_recent: list[dict[str, Any]]
+    rework_rate_30d: float
 
 
 @app.get("/api/monitor", response_model=MonitorResponse)
@@ -591,6 +654,22 @@ def monitor() -> MonitorResponse:
         changepoint_unaddressed=changepoint_unaddressed,
     )
 
+    # ── Score log ────────────────────────────────────────────────────────────
+    scoring_recent: list[dict[str, Any]] = []
+    rework_rate_30d = 0.0
+    if SCORE_LOG_CSV.exists():
+        try:
+            sl = pd.read_csv(SCORE_LOG_CSV)
+            scoring_recent = sl.tail(10).to_dict("records")
+            if "timestamp" in sl.columns and "verdict" in sl.columns:
+                import datetime as _dt2
+                cutoff = (_dt2.datetime.now() - _dt2.timedelta(days=30)).isoformat()
+                sl30 = sl[sl["timestamp"] >= cutoff]
+                if len(sl30):
+                    rework_rate_30d = round(float((sl30["verdict"] == "rework").mean()), 3)
+        except Exception:
+            pass
+
     return MonitorResponse(
         dates=[str(d.date()) for d in df["date"]],
         new_followers_smooth=[round(float(v), 2) for v in smooth],
@@ -606,6 +685,8 @@ def monitor() -> MonitorResponse:
         leads_coverage=leads_coverage,
         leads_by_archetype=leads_by_archetype,
         freshness=freshness,
+        scoring_recent=scoring_recent,
+        rework_rate_30d=rework_rate_30d,
     )
 
 
@@ -933,6 +1014,22 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
             name="Impressions/j", line={"color": "#4A90D9", "width": 1},
             opacity=0.6,
         ), secondary_y=True)
+        # Bandes de fond pour phases d'accélération (ruptures "up")
+        last_dates = df["date"].dt.date.tolist()
+        series_end = last_dates[-1] if last_dates else None
+        up_alarms = [cp for cp in alarms if cp.direction == "up"]
+        for i, cp in enumerate(up_alarms):
+            # Phase end = next alarm of any direction, or end of series
+            next_alarms = [c for c in alarms if c.detected_date > cp.detected_date]
+            phase_end = next_alarms[0].detected_date if next_alarms else series_end
+            if phase_end and phase_end > cp.detected_date:
+                fig.add_vrect(
+                    x0=str(cp.detected_date), x1=str(phase_end),
+                    fillcolor="rgba(76,175,80,0.08)", line_width=0,
+                    annotation_text=f"Accélération {cp.detected_date}",
+                    annotation_font_color="#4CAF50",
+                    annotation_font_size=10,
+                )
         for cp in alarms:
             fig.add_vline(x=str(cp.detected_date), line_dash="dot",
                           line_color="orange", annotation_text=f"CUSUM {cp.direction}",
@@ -1063,6 +1160,31 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
         margin={"t": 60, "b": 40},
     )
     figures["bandit_live"] = fig_live.to_json()
+
+    # ── Figure 6: précision@20% dans le temps ────────────────────────────────
+    fig_prec = go.Figure()
+    if PRECISION_LOG_CSV.exists():
+        try:
+            pr_df = pd.read_csv(PRECISION_LOG_CSV)
+            if len(pr_df) >= 1:
+                fig_prec.add_trace(go.Scatter(
+                    x=pr_df["timestamp"].tolist(),
+                    y=pr_df["precision_at_20"].tolist(),
+                    mode="lines+markers",
+                    name="Précision@20%",
+                    line={"color": "#E8540A"},
+                    text=[f"n={n}" for n in pr_df["n_posts"].tolist()],
+                    hovertemplate="%{x}<br>Préc@20: %{y:.3f}<br>%{text}<extra></extra>",
+                ))
+        except Exception:
+            pass
+    fig_prec.update_layout(
+        template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
+        title="Tendance Précision@20% (par ingestion)",
+        yaxis_title="Précision@20%", yaxis={"range": [0, 1]},
+        margin={"t": 50, "b": 40},
+    )
+    figures["precision_trend"] = fig_prec.to_json()
 
     return figures
 

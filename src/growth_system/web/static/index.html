@@ -365,6 +365,31 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
     </table>
   </div>
 
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <h2>Précision@20% dans le temps</h2>
+        <div id="chart-precision-trend" class="plotly-chart"></div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h2>Derniers brouillons scorés</h2>
+        <div style="color:var(--text-dim);font-size:11px;margin-bottom:8px">
+          Taux de rework (30j) : <strong id="rework-rate" style="font-size:14px">—</strong>
+        </div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr><th>Date</th><th>Extrait</th><th>P(queue)</th><th>Verdict</th></tr></thead>
+            <tbody id="scoring-recent-body">
+              <tr><td colspan="4" style="color:var(--text-dim)">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <button class="secondary" onclick="loadMonitor()" style="margin-top:4px">Rafraîchir monitoring</button>
 
   <!-- ─── Table des posts ─────────────────────────────────────────────── -->
@@ -881,7 +906,8 @@ async function loadMonitor() {
     if (figs.distribution) renderFig('chart-distribution', figs.distribution);
     if (figs.cusum)        renderFig('chart-cusum', figs.cusum);
     if (figs.bandit)       renderFig('chart-bandit', figs.bandit);
-    if (figs.bandit_live)  renderFig('chart-bandit-live', figs.bandit_live);
+    if (figs.bandit_live)      renderFig('chart-bandit-live', figs.bandit_live);
+    if (figs.precision_trend)  renderFig('chart-precision-trend', figs.precision_trend);
 
     // Leads coverage banner
     const banner = document.getElementById('leads-coverage-banner');
@@ -933,6 +959,24 @@ async function loadMonitor() {
       <div><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Dernière ingestion</div>${_age(fr.last_ingest_at)}</div>
       <div><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Dernier ré-entraînement</div>${_age(fr.last_retrain_at)}</div>
       <div><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Dernière alarme CUSUM</div>${_age(fr.last_changepoint_at)}${_cpFlag}</div>`;
+
+    // Scoring recent card
+    const sr = r.scoring_recent || [];
+    const rr = r.rework_rate_30d ?? 0;
+    document.getElementById('scoring-recent-body').innerHTML = sr.length
+      ? sr.map(s => {
+          const verdictColor = s.verdict === 'publish' ? 'var(--green)'
+            : s.verdict === 'optimize' ? 'var(--amber)' : 'var(--red)';
+          return `<tr>
+            <td style="color:var(--text-dim);font-size:10px">${(s.timestamp||'').slice(0,16)}</td>
+            <td style="max-width:200px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${s.text_excerpt||''}</td>
+            <td>${(s.p_queue*100||0).toFixed(1)}%</td>
+            <td style="color:${verdictColor}">${s.verdict||''}</td>
+          </tr>`;
+        }).join('')
+      : '<tr><td colspan="4" style="color:var(--text-dim)">Aucun scoring récent</td></tr>';
+    document.getElementById('rework-rate').textContent = (rr * 100).toFixed(1) + '%';
+    document.getElementById('rework-rate').style.color = rr > 0.5 ? 'var(--red)' : rr > 0.3 ? 'var(--amber)' : 'var(--green)';
 
     // Alarms table
     document.getElementById('alarms-body').innerHTML = r.alarms.length
