@@ -981,9 +981,9 @@ def get_posts(
 
 @app.get("/api/monitor/figures")
 def monitor_figures() -> dict:  # type: ignore[type-arg]
-    """Return 4 Plotly figures as JSON for the Monitoring tab."""
+    """Return Plotly figures as JSON for the Monitoring tab."""
     import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
+    import numpy as _np
 
     figures: dict[str, str] = {}
 
@@ -993,71 +993,76 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
         df = df.sort_values("date").reset_index(drop=True)
         smooth = df["new_followers"].rolling(14, min_periods=1).mean()
 
-        # Rerun CUSUM to get alarms for annotation
+        calib = smooth.iloc[:60]
+        mu0 = float(calib.mean())
+        sigma = max(float(calib.std()), 1e-3)
         from growth_system.changepoint import CusumDetector as _CD
-        _det = _CD(mu0=float(smooth.iloc[:60].mean()),
-                   k=0.5 * max(float(smooth.iloc[:60].std()), 1e-3),
-                   h=4.5 * max(float(smooth.iloc[:60].std()), 1e-3))
+        _det = _CD(mu0=mu0, k=0.5 * sigma, h=4.5 * sigma)
         alarms = []
         for _, row in df.iterrows():
             cp = _det.update(float(smooth[row.name]), row["date"].date())
             if cp:
                 alarms.append(cp)
 
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(go.Scatter(
-            x=df["date"], y=smooth.round(2),
-            name="Abonnés/j (lissé 14j)", line={"color": "#E8540A", "width": 2},
-        ), secondary_y=False)
-        fig.add_trace(go.Scatter(
-            x=df["date"], y=df["impressions"],
-            name="Impressions/j", line={"color": "#4A90D9", "width": 1},
-            opacity=0.6,
-        ), secondary_y=True)
-        # Bandes de fond pour phases d'accélération (ruptures "up")
-        last_dates = df["date"].dt.date.tolist()
-        series_end = last_dates[-1] if last_dates else None
-        up_alarms = [cp for cp in alarms if cp.direction == "up"]
-        for i, cp in enumerate(up_alarms):
-            # Phase end = next alarm of any direction, or end of series
-            next_alarms = [c for c in alarms if c.detected_date > cp.detected_date]
-            phase_end = next_alarms[0].detected_date if next_alarms else series_end
-            if phase_end and phase_end > cp.detected_date:
-                fig.add_vrect(
-                    x0=str(cp.detected_date), x1=str(phase_end),
-                    fillcolor="rgba(76,175,80,0.08)", line_width=0,
-                    annotation_text=f"Accélération {cp.detected_date}",
-                    annotation_font_color="#4CAF50",
-                    annotation_font_size=10,
-                )
+        # Build shapes as dicts (avoids slow add_vline / add_vrect calls)
+        shapes = []
+        annotations = []
+        last_date = str(df["date"].dt.date.tolist()[-1]) if len(df) else None
         for cp in alarms:
-            fig.add_vline(x=str(cp.detected_date), line_dash="dot",
-                          line_color="orange", annotation_text=f"CUSUM {cp.direction}",
-                          annotation_font_color="orange")
+            if cp.direction == "up":
+                next_cp = next((c for c in alarms if c.detected_date > cp.detected_date), None)
+                x1 = str(next_cp.detected_date) if next_cp else last_date
+                if x1:
+                    shapes.append(dict(type="rect", x0=str(cp.detected_date), x1=x1,
+                                       y0=0, y1=1, xref="x", yref="paper",
+                                       fillcolor="rgba(76,175,80,0.08)", line_width=0))
+                    annotations.append(dict(x=str(cp.detected_date), y=0.98, xref="x", yref="paper",
+                                            text=f"Accél. {cp.detected_date}", showarrow=False,
+                                            font=dict(color="#4CAF50", size=10), xanchor="left"))
+            shapes.append(dict(type="line", x0=str(cp.detected_date), x1=str(cp.detected_date),
+                               y0=0, y1=1, xref="x", yref="paper",
+                               line=dict(color="orange", dash="dot", width=1)))
+            annotations.append(dict(x=str(cp.detected_date), y=0.88, xref="x", yref="paper",
+                                    text=f"CUSUM {cp.direction}", showarrow=False,
+                                    font=dict(color="orange", size=10), xanchor="left"))
+
+        # Two y-axes via layout (avoids make_subplots overhead)
+        imp_max = float(df["impressions"].max()) or 1.0
+        smooth_max = float(smooth.max()) or 1.0
+        imp_scaled = (df["impressions"] / imp_max * smooth_max).tolist()
+
+        fig = go.Figure(data=[
+            go.Scatter(x=df["date"].tolist(), y=smooth.round(2).tolist(),
+                       name="Abonnés/j (lissé 14j)", line={"color": "#E8540A", "width": 2}),
+            go.Scatter(x=df["date"].tolist(), y=imp_scaled,
+                       name="Impressions/j (éch. droite)", line={"color": "#4A90D9", "width": 1},
+                       opacity=0.6),
+        ])
         fig.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
             title="Dynamique d'audience", legend={"orientation": "h"},
             margin={"t": 50, "b": 40},
+            shapes=shapes, annotations=annotations,
         )
-        fig.update_yaxes(title_text="Abonnés/j", secondary_y=False)
-        fig.update_yaxes(title_text="Impressions", secondary_y=True)
         figures["growth"] = fig.to_json()
 
     # ── Figure 2: distribution eng_score ─────────────────────────────────────
     if POSTS_CSV.exists():
         df_p = pd.read_csv(POSTS_CSV)
-        fig2 = go.Figure()
-        fig2.add_trace(go.Histogram(
-            x=df_p["eng_score"], nbinsx=30,
+        fig2 = go.Figure(data=[go.Histogram(
+            x=df_p["eng_score"].tolist(), nbinsx=30,
             marker_color="#E8540A", opacity=0.8, name="Eng. Score",
-        ))
-        fig2.add_vline(x=ENG_Q80, line_dash="dash", line_color="white",
-                       annotation_text=f"q80 = {ENG_Q80}", annotation_font_color="white")
+        )])
         fig2.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
             title="Distribution de l'engagement (eng_score)",
             xaxis_title="Eng. Score", yaxis_title="Nombre de posts",
             margin={"t": 50, "b": 40},
+            shapes=[dict(type="line", x0=ENG_Q80, x1=ENG_Q80, y0=0, y1=1,
+                         xref="x", yref="paper", line=dict(color="white", dash="dash"))],
+            annotations=[dict(x=ENG_Q80, y=1, xref="x", yref="paper",
+                              text=f"q80={ENG_Q80}", showarrow=False,
+                              font=dict(color="white", size=10))],
         )
         figures["distribution"] = fig2.to_json()
 
@@ -1066,11 +1071,12 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
     if backtest_series_path.exists():
         with open(backtest_series_path) as f:
             bt = json.load(f)
-        fig3 = go.Figure()
         dates_bt = bt.get("dates", [])
-        for arm in ALL_ARMS:
-            vals = [p.get(arm, 0) for p in bt.get("posteriors", [])]
-            fig3.add_trace(go.Scatter(x=dates_bt, y=vals, name=arm, mode="lines"))
+        fig3 = go.Figure(data=[
+            go.Scatter(x=dates_bt, y=[p.get(arm, 0) for p in bt.get("posteriors", [])],
+                       name=arm, mode="lines")
+            for arm in ALL_ARMS
+        ])
         fig3.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
             title="Évolution des posteriors par archétype (dernier backtest)",
@@ -1078,7 +1084,6 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
         )
         figures["bandit"] = fig3.to_json()
     else:
-        # Placeholder empty figure
         fig3 = go.Figure()
         fig3.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
@@ -1094,40 +1099,39 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
         calib = smooth.iloc[:60]
         mu0 = float(calib.mean())
         sigma = max(float(calib.std()), 1e-3)
-        from growth_system.changepoint import CusumDetector as _CD2
-        det2 = _CD2(mu0=mu0, k=0.5 * sigma, h=4.5 * sigma)
-        s_plus_vals, s_minus_vals, alarm_dates = [], [], []
-        for _, row in df.iterrows():
-            det2._s_plus = max(0.0, det2._s_plus + (float(smooth[row.name]) - mu0 - det2.k))
-            det2._s_minus = max(0.0, det2._s_minus - (float(smooth[row.name]) - mu0 - det2.k))
-            s_plus_vals.append(round(det2._s_plus, 3))
-            s_minus_vals.append(round(det2._s_minus, 3))
-            if det2._s_plus >= det2.h or det2._s_minus >= det2.h:
-                alarm_dates.append(str(row["date"].date()))
-                det2._s_plus = 0.0
-                det2._s_minus = 0.0
+        k = 0.5 * sigma
+        h = 4.5 * sigma
+        sp, sm = 0.0, 0.0
+        sp_vals, sm_vals = [], []
+        for v in smooth:
+            sp = max(0.0, sp + (float(v) - mu0 - k))
+            sm = max(0.0, sm - (float(v) - mu0 - k))
+            sp_vals.append(round(sp, 3))
+            sm_vals.append(round(sm, 3))
+            if sp >= h or sm >= h:
+                sp = sm = 0.0
 
-        fig4 = go.Figure()
-        fig4.add_trace(go.Scatter(x=df["date"], y=s_plus_vals,
-                                   name="S+ (hausse)", line={"color": "#E8540A"}))
-        fig4.add_trace(go.Scatter(x=df["date"], y=s_minus_vals,
-                                   name="S− (baisse)", line={"color": "#4A90D9"}))
-        fig4.add_hline(y=det2.h, line_dash="dash", line_color="white",
-                       annotation_text=f"h = {det2.h:.2f}", annotation_font_color="white")
+        dates_list = df["date"].tolist()
+        fig4 = go.Figure(data=[
+            go.Scatter(x=dates_list, y=sp_vals, name="S+ (hausse)", line={"color": "#E8540A"}),
+            go.Scatter(x=dates_list, y=sm_vals, name="S− (baisse)", line={"color": "#4A90D9"}),
+        ])
         fig4.update_layout(
             template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
             title="Statistiques CUSUM (S+, S−)", yaxis_title="Statistique",
             margin={"t": 50, "b": 40},
+            shapes=[dict(type="line", x0=dates_list[0], x1=dates_list[-1], y0=h, y1=h,
+                         xref="x", yref="y", line=dict(color="white", dash="dash"))],
+            annotations=[dict(x=dates_list[-1], y=h, text=f"h={h:.1f}", showarrow=False,
+                              font=dict(color="white", size=10))],
         )
         figures["cusum"] = fig4.to_json()
 
-    # ── Figure 5: bandit posteriors EN DIRECT (état actuel de growth_state.json)
-    from scipy.stats import beta as _beta_dist
-    import numpy as _np
+    # ── Figure 5: bandit posteriors EN DIRECT ────────────────────────────────
+    import numpy as _np2
 
     bandit_live = _get_bandit()
     live_post = bandit_live.posterior()
-    # Best arm by expected theta (deterministic — argmax, not sampled)
     best_live = max(ALL_ARMS, key=lambda a: live_post[a][0] / (live_post[a][0] + live_post[a][1]))
 
     ts = "jamais"
@@ -1135,23 +1139,28 @@ def monitor_figures() -> dict:  # type: ignore[type-arg]
         import datetime as _dt
         ts = _dt.datetime.fromtimestamp(STATE_JSON.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
 
-    _x = [i / 199 for i in range(200)]
+    _x = _np2.linspace(0, 1, 200)
     _COLORS = {"contrarian": "#E8540A", "data": "#4A90D9",
                "question": "#4CAF50", "statement": "#FF9800"}
-    fig_live = go.Figure()
-    for arm in ALL_ARMS:
-        alpha_v, beta_v = live_post[arm]
-        try:
-            x_arr = _np.linspace(0, 1, 200)
-            y_arr = _beta_dist.pdf(x_arr, alpha_v, beta_v).tolist()
-        except Exception:
-            y_arr = [0.0] * 200
-        fig_live.add_trace(go.Scatter(
-            x=_x, y=y_arr,
+
+    def _beta_pdf(x: "_np2.ndarray", a: float, b: float) -> "_np2.ndarray":  # type: ignore[name-defined]
+        """Fast Beta PDF via numpy log-space (avoids scipy import)."""
+        from math import lgamma
+        log_norm = lgamma(a + b) - lgamma(a) - lgamma(b)
+        log_p = (a - 1) * _np2.log(_np2.maximum(x, 1e-300)) + \
+                (b - 1) * _np2.log(_np2.maximum(1 - x, 1e-300)) + log_norm
+        return _np2.exp(log_p)
+
+    fig_live = go.Figure(data=[
+        go.Scatter(
+            x=_x.tolist(),
+            y=_beta_pdf(_x, live_post[arm][0], live_post[arm][1]).tolist(),
             name=arm + (" ← recommandé" if arm == best_live else ""),
             line={"color": _COLORS.get(arm, "#888"),
                   "width": 3 if arm == best_live else 1.5},
-        ))
+        )
+        for arm in ALL_ARMS
+    ])
     fig_live.update_layout(
         template="plotly_dark", paper_bgcolor="#1A1A1A", plot_bgcolor="#1A1A1A",
         title=f"Posteriors bandit EN DIRECT — Dernière MàJ : {ts}",
