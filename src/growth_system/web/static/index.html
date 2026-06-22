@@ -292,6 +292,14 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
     <span id="leads-coverage-text"></span>
   </div>
 
+  <!-- Carte fraîcheur -->
+  <div class="card" id="freshness-card" style="margin-bottom:12px">
+    <h2>Fraîcheur du système</h2>
+    <div id="freshness-body" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;color:var(--text-dim);font-size:12px">
+      Chargement…
+    </div>
+  </div>
+
   <div class="card" id="monitor-alarm-banner" style="display:none;border-color:var(--amber)">
     <span style="color:var(--amber)">&#9888; Rupture de régime détectée — ré-entraînement recommandé.</span>
     <span id="alarm-detail" style="color:var(--text-dim);margin-left:8px"></span>
@@ -910,6 +918,21 @@ async function loadMonitor() {
         <div class="col"><div style="color:var(--text-dim);font-size:11px">Abonnés gagnés</div><div style="font-size:20px">${t.new_followers.toLocaleString('fr')}</div></div>
         <div class="col"><div style="color:var(--text-dim);font-size:11px">Impressions/j (moy.)</div><div style="font-size:20px">${t.avg_daily_impressions.toFixed(0)}</div></div>
       </div>`;
+
+    // Freshness card
+    const fr = r.freshness || {};
+    const _age = (iso) => {
+      if (!iso) return '<span style="color:var(--text-dim)">inconnu</span>';
+      const d = new Date(iso);
+      const days = Math.floor((Date.now() - d) / 86400000);
+      return `<span>${days} j  <span style="color:var(--text-dim);font-size:11px">(${iso.slice(0,10)})</span></span>`;
+    };
+    const _cpFlag = fr.changepoint_unaddressed
+      ? '<span style="color:var(--amber)"> ⚠ NON TRAITÉE</span>' : '';
+    document.getElementById('freshness-body').innerHTML = `
+      <div><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Dernière ingestion</div>${_age(fr.last_ingest_at)}</div>
+      <div><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Dernier ré-entraînement</div>${_age(fr.last_retrain_at)}</div>
+      <div><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Dernière alarme CUSUM</div>${_age(fr.last_changepoint_at)}${_cpFlag}</div>`;
 
     // Alarms table
     document.getElementById('alarms-body').innerHTML = r.alarms.length

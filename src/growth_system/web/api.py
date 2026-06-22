@@ -360,6 +360,7 @@ def update(req: UpdateRequest) -> UpdateResponse:
 
 
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
+LAST_INGEST_JSON = DATA_DIR / "last_ingest.json"
 
 
 class IngestResponse(BaseModel):
@@ -422,6 +423,13 @@ async def ingest(
     global _scorer
     _scorer = None
 
+    # Persist last ingest timestamp (atomic)
+    import datetime as _dt
+    _li_tmp = LAST_INGEST_JSON.with_suffix(".tmp")
+    with open(_li_tmp, "w") as _f:
+        json.dump({"last_ingest_at": _dt.datetime.now().isoformat(timespec="seconds")}, _f)
+    _li_tmp.rename(LAST_INGEST_JSON)
+
     return IngestResponse(**summary)
 
 
@@ -434,6 +442,13 @@ class AlarmItem(BaseModel):
     date: str
     direction: str
     statistic: float
+
+
+class FreshnessInfo(BaseModel):
+    last_ingest_at: str | None
+    last_retrain_at: str | None
+    last_changepoint_at: str | None
+    changepoint_unaddressed: bool
 
 
 class LeadsByArchetypeItem(BaseModel):
@@ -459,6 +474,7 @@ class MonitorResponse(BaseModel):
     totals: dict[str, float]
     leads_coverage: LeadsCoverage
     leads_by_archetype: list[LeadsByArchetypeItem]
+    freshness: FreshnessInfo
 
 
 @app.get("/api/monitor", response_model=MonitorResponse)
@@ -543,6 +559,38 @@ def monitor() -> MonitorResponse:
                 leads_per_post=round(arm_leads / n_arm, 3),
             ))
 
+    # ── Freshness ────────────────────────────────────────────────────────────
+    last_ingest_at: str | None = None
+    if LAST_INGEST_JSON.exists():
+        try:
+            with open(LAST_INGEST_JSON) as _f:
+                last_ingest_at = json.load(_f).get("last_ingest_at")
+        except Exception:
+            pass
+
+    last_retrain_at: str | None = None
+    if MODEL_PATH.exists():
+        try:
+            with open(MODEL_PATH) as _f:
+                last_retrain_at = json.load(_f).get("trained_at")
+        except Exception:
+            pass
+
+    last_changepoint_at: str | None = alarms[-1].date if alarms else None
+
+    changepoint_unaddressed = False
+    if last_changepoint_at and last_retrain_at:
+        changepoint_unaddressed = last_changepoint_at > last_retrain_at
+    elif last_changepoint_at and last_retrain_at is None:
+        changepoint_unaddressed = True  # alarm exists but model was never retrained
+
+    freshness = FreshnessInfo(
+        last_ingest_at=last_ingest_at,
+        last_retrain_at=last_retrain_at,
+        last_changepoint_at=last_changepoint_at,
+        changepoint_unaddressed=changepoint_unaddressed,
+    )
+
     return MonitorResponse(
         dates=[str(d.date()) for d in df["date"]],
         new_followers_smooth=[round(float(v), 2) for v in smooth],
@@ -557,6 +605,7 @@ def monitor() -> MonitorResponse:
         },
         leads_coverage=leads_coverage,
         leads_by_archetype=leads_by_archetype,
+        freshness=freshness,
     )
 
 
