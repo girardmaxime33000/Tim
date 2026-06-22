@@ -785,6 +785,12 @@ def run_backtest_endpoint() -> BacktestResponse:
 
     plot_path = str(DATA_DIR / "backtest_results.png")
 
+    # Force le backend non-interactif AVANT tout import de matplotlib.pyplot.
+    # Sur macOS, le backend par défaut (MacOS) exige le thread principal ;
+    # FastAPI appelle ce handler dans un thread worker → RuntimeError sans ce fix.
+    import matplotlib
+    matplotlib.use("agg")
+
     from growth_system.backtest import run_backtest, REFERENCE_DATE
     from datetime import timedelta
     import numpy as np
