@@ -39,6 +39,7 @@ POSTS_CSV = DATA_DIR / "posts.csv"
 AUDIENCE_CSV = DATA_DIR / "daily_audience.csv"
 STATE_JSON = _REPO_ROOT / "growth_state.json"
 LEADS_CSV = DATA_DIR / "leads.csv"
+BANDIT_LOG_CSV = DATA_DIR / "bandit_log.csv"
 
 # ---------------------------------------------------------------------------
 # Singletons (loaded once at startup)
@@ -156,6 +157,20 @@ class UpdateResponse(BaseModel):
     reward: float
     bandit_updated: bool
     posteriors: dict[str, dict[str, float]]
+    tail_warning: str | None = None  # désaccord déclaré vs corpus
+
+
+class BanditLogEntry(BaseModel):
+    timestamp: str
+    arm: str
+    tail: int
+    leads: int
+    post_id: str | None
+    reward: float
+
+
+class BanditLogResponse(BaseModel):
+    entries: list[BanditLogEntry]
 
 
 # ---------------------------------------------------------------------------
@@ -354,12 +369,41 @@ def recommend() -> RecommendResponse:
 @app.post("/api/update", response_model=UpdateResponse)
 def update(req: UpdateRequest) -> UpdateResponse:
     """Record a post outcome and update the bandit."""
+    import csv as _csv
+    import datetime as _dt
+    import tempfile as _tmp
+    import shutil as _shutil
+
     if req.arm not in ALL_ARMS:
-        from fastapi import HTTPException
         raise HTTPException(status_code=422, detail=f"Unknown arm '{req.arm}'. Valid: {ALL_ARMS}")
 
+    # --- Normaliser post_id ---
+    post_id_canon: str | None = None
+    if req.post_id and req.post_id.strip():
+        post_id_canon = normalize_post_id(req.post_id.strip())
+
+    # --- Validation tail vs corpus (avertissement non bloquant) ---
+    tail_warning: str | None = None
+    if post_id_canon and POSTS_CSV.exists():
+        try:
+            pf = pd.read_csv(POSTS_CSV)
+            # Chercher le post par normalisation de permalink
+            pf["post_id_norm"] = pf["permalink"].astype(str).apply(normalize_post_id)
+            match = pf[pf["post_id_norm"] == post_id_canon]
+            if not match.empty:
+                corpus_in_tail = int(match.iloc[0]["eng_score"] >= ENG_Q80)
+                if corpus_in_tail != req.tail:
+                    declared = "top 20 %" if req.tail == 1 else "hors top 20 %"
+                    actual = "top 20 %" if corpus_in_tail == 1 else "hors top 20 %"
+                    tail_warning = (
+                        f"Désaccord : vous déclarez '{declared}' mais le corpus "
+                        f"indique '{actual}' (eng_score={match.iloc[0]['eng_score']:.1f})."
+                    )
+        except Exception:
+            pass
+
+    # --- Calcul récompense ---
     reward_weights = RewardWeights()
-    # Normalise leads: 3 leads → 1.0 (saturates)
     lead_signal = min(req.leads / 3.0, 1.0)
     reward = float(
         reward_weights.w_tail * req.tail
@@ -367,13 +411,39 @@ def update(req: UpdateRequest) -> UpdateResponse:
     )
     reward = max(0.0, min(1.0, reward))
 
+    # --- Mise à jour bandit ---
     bandit = _get_bandit()
     bandit.update(req.arm, reward)  # type: ignore[arg-type]
     _save_bandit_state()
 
-    # Persist to leads.csv if post_id provided
-    if req.post_id and req.leads > 0:
-        _append_lead(req.post_id, req.leads)
+    # --- Auto-écriture leads.csv si post_id + leads ---
+    if post_id_canon and req.leads > 0:
+        _append_lead(post_id_canon, req.leads)
+
+    # --- Journal bandit_log.csv (atomique) ---
+    _log_cols = ["timestamp", "arm", "tail", "leads", "post_id", "reward"]
+    _log_rows: list[dict] = []
+    if BANDIT_LOG_CSV.exists():
+        try:
+            _log_rows = pd.read_csv(BANDIT_LOG_CSV, dtype={"post_id": str}).to_dict("records")
+        except Exception:
+            pass
+    _log_rows.append({
+        "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
+        "arm": req.arm,
+        "tail": req.tail,
+        "leads": req.leads,
+        "post_id": post_id_canon or "",
+        "reward": round(reward, 4),
+    })
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with _tmp.NamedTemporaryFile(mode="w", dir=DATA_DIR, suffix=".tmp",
+                                 delete=False, newline="") as _tf:
+        _w = _csv.DictWriter(_tf, fieldnames=_log_cols)
+        _w.writeheader()
+        _w.writerows(_log_rows)
+        _tf_path = _tf.name
+    _shutil.move(_tf_path, str(BANDIT_LOG_CSV))
 
     post = bandit.posterior()
     posteriors = {
@@ -384,7 +454,12 @@ def update(req: UpdateRequest) -> UpdateResponse:
         }
         for a, ab in post.items()
     }
-    return UpdateResponse(reward=round(reward, 4), bandit_updated=True, posteriors=posteriors)
+    return UpdateResponse(
+        reward=round(reward, 4),
+        bandit_updated=True,
+        posteriors=posteriors,
+        tail_warning=tail_warning,
+    )
 
 
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
@@ -392,6 +467,29 @@ ANALYTICS_DIR = DATA_DIR / "raw" / "analytics"
 LAST_INGEST_JSON = DATA_DIR / "last_ingest.json"
 SCORE_LOG_CSV = DATA_DIR / "score_log.csv"
 PRECISION_LOG_CSV = DATA_DIR / "precision_log.csv"
+
+
+@app.get("/api/bandit/log", response_model=BanditLogResponse)
+def get_bandit_log(limit: int = 20) -> BanditLogResponse:
+    """Retourne les N dernières mises à jour bandit (audit trail)."""
+    if not BANDIT_LOG_CSV.exists():
+        return BanditLogResponse(entries=[])
+    try:
+        df = pd.read_csv(BANDIT_LOG_CSV, dtype={"post_id": str})
+        entries = [
+            BanditLogEntry(
+                timestamp=str(r.get("timestamp", "")),
+                arm=str(r.get("arm", "")),
+                tail=int(r.get("tail", 0)),
+                leads=int(r.get("leads", 0)),
+                post_id=str(r.get("post_id", "")) or None,
+                reward=float(r.get("reward", 0)),
+            )
+            for r in df.tail(limit).to_dict("records")
+        ]
+        return BanditLogResponse(entries=list(reversed(entries)))
+    except Exception:
+        return BanditLogResponse(entries=[])
 
 
 class IngestResponse(BaseModel):

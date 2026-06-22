@@ -276,6 +276,17 @@ canvas { display: block; width: 100% !important; height: 220px !important; }
         <div id="update-result" style="margin-top:8px"></div>
       </div>
     </div>
+
+    <!-- Journal des mises à jour -->
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h2 style="margin:0">Journal des mises à jour</h2>
+        <button class="secondary" style="font-size:11px;padding:4px 10px" onclick="loadBanditLog()">↺ Rafraîchir</button>
+      </div>
+      <div id="bandit-log-container">
+        <span style="color:var(--text-dim);font-size:12px">Chargement…</span>
+      </div>
+    </div>
   </div>
 
 </div><!-- /tab-bandit -->
@@ -729,7 +740,7 @@ function showTab(id) {
   event.target.classList.add('active');
   if (id === 'profil') loadProfile();
   if (id === 'monitor') { loadMonitor(); loadPostsTable(1); }
-  if (id === 'bandit') doRecommend();
+  if (id === 'bandit') { doRecommend(); loadBanditLog(); }
   if (id === 'leads') loadLeads();
 }
 
@@ -922,13 +933,60 @@ async function doUpdate() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ arm, tail, leads, post_id }),
     });
-    el.innerHTML = `<div class="msg ok">
+    let html = `<div class="msg ok">
       Récompense : <b>${(r.reward * 100).toFixed(1)} %</b> &nbsp;|&nbsp;
-      Bandit mis à jour ✓
-    </div>`;
+      Bandit mis à jour ✓`;
+    if (leads > 0 && post_id) html += ` &nbsp;|&nbsp; leads.csv mis à jour ✓`;
+    html += `</div>`;
+    if (r.tail_warning) {
+      html += `<div class="msg warn" style="margin-top:6px">⚠ ${esc(r.tail_warning)}</div>`;
+    }
+    el.innerHTML = html;
     doRecommend();
+    loadBanditLog();
   } catch(e) {
     el.innerHTML = `<div class="msg err">${e.message}</div>`;
+  }
+}
+
+async function loadBanditLog() {
+  const container = document.getElementById('bandit-log-container');
+  if (!container) return;
+  try {
+    const r = await apiFetch('/api/bandit/log?limit=15');
+    if (!r.entries || r.entries.length === 0) {
+      container.innerHTML = '<span style="color:var(--text-dim);font-size:12px">Aucune entrée — enregistrez votre premier résultat ci-dessus.</span>';
+      return;
+    }
+    const ARM_COLORS = { contrarian: 'var(--accent)', data: '#4A90D9', question: 'var(--green)', statement: 'var(--amber)' };
+    container.innerHTML = `<table style="width:100%;font-size:11px;border-collapse:collapse">
+      <thead><tr style="border-bottom:1px solid var(--border);color:var(--text-dim)">
+        <th style="text-align:left;padding:4px 6px">Date</th>
+        <th style="text-align:left;padding:4px 6px">Archétype</th>
+        <th style="text-align:center;padding:4px 6px">Tail</th>
+        <th style="text-align:center;padding:4px 6px">Leads</th>
+        <th style="text-align:left;padding:4px 6px">Post ID</th>
+        <th style="text-align:right;padding:4px 6px">Récompense</th>
+      </tr></thead>
+      <tbody>${r.entries.map(e => {
+        const color = ARM_COLORS[e.arm] || 'var(--text)';
+        const tailBadge = e.tail === 1
+          ? '<span style="color:var(--green)">✓ top 20%</span>'
+          : '<span style="color:var(--text-dim)">✗</span>';
+        const pid = e.post_id ? `<code style="font-size:10px">${esc(e.post_id.slice(-8))}</code>` : '—';
+        const ts = e.timestamp.replace('T', ' ').slice(0, 16);
+        return `<tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:5px 6px;color:var(--text-dim)">${esc(ts)}</td>
+          <td style="padding:5px 6px"><span style="color:${color};font-weight:600">${esc(e.arm)}</span></td>
+          <td style="padding:5px 6px;text-align:center">${tailBadge}</td>
+          <td style="padding:5px 6px;text-align:center">${e.leads > 0 ? e.leads : '—'}</td>
+          <td style="padding:5px 6px">${pid}</td>
+          <td style="padding:5px 6px;text-align:right;font-weight:600">${(e.reward * 100).toFixed(0)} %</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>`;
+  } catch(e) {
+    container.innerHTML = `<span style="color:var(--text-dim);font-size:12px">Journal indisponible.</span>`;
   }
 }
 
